@@ -1,4 +1,5 @@
-﻿import logging
+﻿import gc
+import logging
 from pathlib import Path
 from typing import Optional, Tuple
 import torch
@@ -8,18 +9,27 @@ logger = logging.getLogger("T2V.TextEncoder")
 
 class CpuTextEncoderManager:
     """
-    CPU 文本编码器管理器
+    CPU 物理内存文本编码器管理器
     
-    设计关键（为什么必须绑定 CPU）：
-    Wan2.1 依赖 UMT5-XXL 作为文本条件特征提取器，其权重达 11GB+。
-    在 4GB 显存显卡（NVIDIA Quadro T1000）上，若将文本编码器载入显存会瞬间导致 CUDA OOM；
-    而本机实测配备了高达 40GB 的物理内存，因此将 UMT5-XXL 100% 绑定于 CPU（device='cpu'）执行推理，
-    仅将最终得到的微小特征张量（Prompt Embedding，约几兆字节）传输至 GPU，
-    从而达成在文本特征抽取阶段【对 4G 显卡显存 0 占用】的极限工程优化。
+    设计核心机制：
+    1. 零显存占用原则：
+       将 5.4GB 的 UMT5-XXL 文本编码器严格限定在 CPU 物理内存中加载与执行（利用本机实测 40GB RAM）。
+       杜绝文本编码模型进入 GPU 物理显存，为 4GB Quadro T1000 节省超过 5GB 的宝贵显存空间。
+    2. 标准嵌入对齐：
+       输出 Wan2.1 要求的 [batch_size, max_seq_len, 4096] 维度嵌入张量，
+       计算完成后仅将此微小张量（约几兆字节）转移至 GPU。
     """
 
-    def __init__(self, model_dir: Path, torch_dtype: torch.dtype = torch.bfloat16):
+    def __init__(
+        self,
+        tokenizer_dir: Path,
+        model_dir: Path,
+        max_sequence_length: int = 226,
+        torch_dtype: torch.dtype = torch.float16
+    ):
+        self.tokenizer_dir = tokenizer_dir
         self.model_dir = model_dir
+        self.max_sequence_length = max_sequence_length
         self.torch_dtype = torch_dtype
         self.tokenizer = None
         self.text_encoder = None
@@ -27,98 +37,90 @@ class CpuTextEncoderManager:
 
     def load(self) -> None:
         """
-        在 CPU 物理内存中延迟加载 Tokenizer 与 Text Encoder
+        在 CPU 物理内存中按需加载 Tokenizer 与 Text Encoder
         """
         if self.text_encoder is not None:
-            logger.info("CPU 文本编码器已就绪，复用现有模型缓存。")
             return
 
-        logger.info(f"正在从 {self.model_dir} 加载 UMT5 文本编码器到 CPU 内存（利用本机 40GB RAM）...")
-        
-        try:
-            from transformers import AutoTokenizer, UMT5EncoderModel
-            
-            # 使用 local_files_only 确保网络抖动或断网时不发生隐式下载阻塞
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                str(self.model_dir),
-                local_files_only=True
-            )
-            # 严格强制加载至 CPU，防止误分配到 CUDA
-            self.text_encoder = UMT5EncoderModel.from_pretrained(
-                str(self.model_dir),
-                torch_dtype=self.torch_dtype,
-                device_map="cpu",
-                local_files_only=True
-            )
-            self.text_encoder.eval()
-            logger.info("UMT5 文本编码器在 CPU 内存加载完成，未占用任何物理显存。")
-        except Exception as e:
-            logger.error(f"加载 CPU 文本编码器失败: {e}", exc_info=True)
-            raise
+        logger.info(f"正在从 {self.tokenizer_dir} 加载分词器...")
+        from transformers import AutoTokenizer, UMT5EncoderModel
+
+        self.tokenizer = AutoTokenizer.from_pretrained(str(self.tokenizer_dir))
+
+        logger.info(f"正在从 {self.model_dir} 加载 UMT5 文本编码器至 CPU 物理内存（利用 40GB RAM，不挤占 GPU 显存）...")
+        self.text_encoder = UMT5EncoderModel.from_pretrained(
+            str(self.model_dir),
+            torch_dtype=self.torch_dtype,
+            device_map="cpu",
+            low_cpu_mem_usage=True
+        )
+        self.text_encoder.eval()
+        logger.info("UMT5 文本编码器在 CPU 内存加载完成，未占用任何显卡物理显存。")
 
     def encode_prompt(
         self,
         prompt: str,
         negative_prompt: Optional[str] = None,
-        max_sequence_length: int = 512
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        target_device: Optional[torch.device] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        使用 CPU 对 Prompt 与 Negative Prompt 进行特征编码
-        
-        返回值：
-        - prompt_embeds: 形状为 [1, seq_len, hidden_dim] 的嵌入张量（位于 CPU）
-        - negative_prompt_embeds: 负向嵌入张量（若未提供则为 None）
+        在 CPU 上对 Prompt 和 Negative Prompt 进行特征抽取，并按需对齐序列长度
         """
         if self.text_encoder is None:
             self.load()
 
-        logger.info(f"正在 CPU 上对提示词进行编码，提示词长度: {len(prompt)} 字符")
-        
+        logger.info(f"正在 CPU 上对提示词进行语义编码: '{prompt[:60]}...'")
+        target_device = target_device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         with torch.no_grad():
+            # 编码正向提示词
             text_inputs = self.tokenizer(
-                prompt,
+                [prompt],
                 padding="max_length",
-                max_length=max_sequence_length,
+                max_length=self.max_sequence_length,
                 truncation=True,
+                add_special_tokens=True,
+                return_attention_mask=True,
                 return_tensors="pt",
             )
             input_ids = text_inputs.input_ids.to(self.device)
-            attention_mask = text_inputs.attention_mask.to(self.device)
+            mask = text_inputs.attention_mask.to(self.device)
+            seq_lens = mask.gt(0).sum(dim=1).long()
 
-            # 在 CPU 上执行前向传播
-            prompt_embeds = self.text_encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask
-            )[0]
+            prompt_embeds = self.text_encoder(input_ids, mask).last_hidden_state
+            prompt_embeds = prompt_embeds.to(dtype=self.torch_dtype)
+            prompt_embeds = [u[:v] for u, v in zip(prompt_embeds, seq_lens)]
+            prompt_embeds = torch.stack(
+                [torch.cat([u, u.new_zeros(self.max_sequence_length - u.size(0), u.size(1))]) for u in prompt_embeds],
+                dim=0
+            )
 
-            neg_embeds = None
-            if negative_prompt:
-                neg_inputs = self.tokenizer(
-                    negative_prompt,
-                    padding="max_length",
-                    max_length=max_sequence_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                neg_input_ids = neg_inputs.input_ids.to(self.device)
-                neg_attention_mask = neg_inputs.attention_mask.to(self.device)
-                neg_embeds = self.text_encoder(
-                    input_ids=neg_input_ids,
-                    attention_mask=neg_attention_mask
-                )[0]
+            # 编码负向提示词
+            neg_prompt = negative_prompt or ""
+            neg_inputs = self.tokenizer(
+                [neg_prompt],
+                padding="max_length",
+                max_length=self.max_sequence_length,
+                truncation=True,
+                add_special_tokens=True,
+                return_attention_mask=True,
+                return_tensors="pt",
+            )
+            neg_input_ids = neg_inputs.input_ids.to(self.device)
+            neg_mask = neg_inputs.attention_mask.to(self.device)
+            neg_seq_lens = neg_mask.gt(0).sum(dim=1).long()
 
-        logger.info(f"提示词 CPU 编码完成，嵌入张量维度: {prompt_embeds.shape}")
+            neg_embeds = self.text_encoder(neg_input_ids, neg_mask).last_hidden_state
+            neg_embeds = neg_embeds.to(dtype=self.torch_dtype)
+            neg_embeds = [u[:v] for u, v in zip(neg_embeds, neg_seq_lens)]
+            neg_embeds = torch.stack(
+                [torch.cat([u, u.new_zeros(self.max_sequence_length - u.size(0), u.size(1))]) for u in neg_embeds],
+                dim=0
+            )
+
+        # 仅将轻量结果嵌入张量转移至 GPU
+        prompt_embeds = prompt_embeds.to(target_device)
+        neg_embeds = neg_embeds.to(target_device)
+
+        logger.info(f"文本编码完成，输出张量形状: {prompt_embeds.shape}，已传入计算设备: {target_device}")
         return prompt_embeds, neg_embeds
-
-    def unload(self) -> None:
-        """
-        手动释放 CPU 内存中的模型对象（当需要极端释放物理内存时调用）
-        """
-        if self.text_encoder is not None:
-            logger.info("正在释放 CPU 文本编码器以清理系统物理内存...")
-            del self.text_encoder
-            del self.tokenizer
-            self.text_encoder = None
-            self.tokenizer = None
-            import gc
-            gc.collect()
