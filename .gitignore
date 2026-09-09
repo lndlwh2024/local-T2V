@@ -1,0 +1,35 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Model Weights & Large Binaries
+models/
+*.gguf
+*.safetensors
+*.bin
+*.pth
+*.pt
+*.onnx
+
+# Outputs & Temporary Artifacts
+output/
+*.mp4
+*.avi
+*.mkv
+*.webm
+*.png
+*.jpg
+*.jpeg
+
+# Logs & Environment
+*.log
+.env
+.idea/
+.vscode/
