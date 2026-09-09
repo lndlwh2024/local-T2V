@@ -94,50 +94,38 @@ class WanT2VLowVramPipeline:
                 prompt_embeds = torch.zeros((1, 226, 4096), dtype=torch.float16, device=self.device)
                 neg_embeds = torch.zeros((1, 226, 4096), dtype=torch.float16, device=self.device)
 
-        # ---------------- 阶段 2: 构建并加载优化推理管线 ----------------
+        # ---------------- 阶段 2: 构建并加载优化去噪主干 (DiT 独占 GPU) ----------------
         with self.sentinel.guard("阶段2_装载低显存模型管线"):
             from diffusers import WanPipeline, AutoencoderKLWan, WanTransformer3DModel, FlowMatchEulerDiscreteScheduler
+            from transformers import AutoTokenizer
 
-            logger.info("装载 Transformer 主干...")
+            logger.info("装载 Transformer 去噪主干 (FP16)...")
             transformer = WanTransformer3DModel.from_pretrained(
                 str(DIFFUSION_DIR),
                 torch_dtype=torch.float16
-            )
-
-            logger.info("装载 3D Causal VAE 并开启切片/分块解码...")
-            vae = AutoencoderKLWan.from_pretrained(
-                str(VAE_DIR / "diffusers_vae"),
-                torch_dtype=torch.float16
-            )
-            vae.enable_tiling()
-            vae.enable_slicing()
+            ).to(self.device)
 
             scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
                 str(DIFFUSION_DIR),
                 subfolder=None
             )
-
-            from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(str(self.tokenizer_dir))
 
             pipe = WanPipeline(
                 transformer=transformer,
-                vae=vae,
+                vae=None,
                 scheduler=scheduler,
                 tokenizer=tokenizer,
                 text_encoder=None
             )
 
-            logger.info("激活模型 CPU 动态卸载 (Model CPU Offload)...")
-            pipe.enable_model_cpu_offload()
-
-        # ---------------- 阶段 3: 潜空间迭代去噪与分块解码 ----------------
+        # ---------------- 阶段 3: 潜空间迭代去噪并解耦解码 ----------------
         with self.sentinel.guard("阶段3_潜空间迭代去噪与解码"):
             generator = None
             if self.config.seed is not None:
                 generator = torch.Generator(device="cpu").manual_seed(self.config.seed)
 
-            logger.info(f"开始去噪推理，步数: {self.config.num_inference_steps} 步...")
+            logger.info(f"开始潜空间去噪推理，步数: {self.config.num_inference_steps} 步...")
             result = pipe(
                 prompt=None,
                 prompt_embeds=prompt_embeds,
@@ -148,11 +136,42 @@ class WanT2VLowVramPipeline:
                 num_inference_steps=self.config.num_inference_steps,
                 guidance_scale=self.config.guidance_scale,
                 generator=generator,
-                output_type="np"
+                output_type="latent"
             )
-            # result.frames 形状: [1, num_frames, height, width, 3]
-            video_frames = result.frames[0]
-            logger.info(f"去噪与解码完成！视频帧形状: {video_frames.shape}")
+            latents = result.frames
+            logger.info(f"去噪完成，生成潜变量张量: {latents.shape}")
+
+            # 关键防御：去噪完成立即卸载 Transformer，将显存清空归还系统
+            del pipe, transformer
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info(f"Transformer 已安全卸载，当前驻留显存: {torch.cuda.memory_allocated() / 1024**2:.2f}MB")
+
+            # 载入 FP32 3D Causal VAE 解码器，彻底杜绝 FP16 反卷积溢出产生的 NaN 与黑块
+            logger.info("装载全精度 FP32 3D Causal VAE 进行无黑块图像重建...")
+            vae = AutoencoderKLWan.from_pretrained(
+                str(VAE_DIR / "diffusers_vae"),
+                torch_dtype=torch.float32
+            ).to(self.device)
+            vae.enable_slicing()
+
+            with torch.no_grad():
+                video_tensor = vae.decode(latents.to(self.device, dtype=torch.float32)).sample
+                # 将形状 [1, 3, T, H, W] 转换为 [T, H, W, 3] uint8
+                raw_frames = video_tensor[0].permute(1, 2, 3, 0).cpu().numpy()
+                raw_frames = np.clip((raw_frames + 1.0) / 2.0, 0.0, 1.0)
+                video_frames = (raw_frames * 255.0).round().astype(np.uint8)
+
+            del vae
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            # 若指定了 target_num_frames，精确裁切为目标帧数以严格对齐业务时长（如 8 帧 @ 8fps 严格 1.0 秒）
+            if self.config.target_num_frames is not None and len(video_frames) > self.config.target_num_frames:
+                logger.info(f"执行帧数精确截断: {len(video_frames)} 帧 -> {self.config.target_num_frames} 帧")
+                video_frames = video_frames[:self.config.target_num_frames]
+
+            logger.info(f"FP32 VAE 视频重建完成！最终帧形状: {video_frames.shape}")
 
         # ---------------- 阶段 4: 输出视频文件并保存审计日志 ----------------
         with self.sentinel.guard("阶段4_视频封装与日志审计"):
@@ -169,7 +188,9 @@ class WanT2VLowVramPipeline:
             "prompt": self.config.prompt,
             "width": self.config.width,
             "height": self.config.height,
-            "num_frames": self.config.num_frames,
+            "num_frames": len(video_frames),
+            "raw_computed_frames": self.config.num_frames,
+            "fps": self.config.fps,
             "num_inference_steps": self.config.num_inference_steps,
             "total_elapsed_sec": round(total_elapsed, 2),
             "gpu_peak_vram_mb": memory_info["gpu_max_allocated_mb"],
@@ -186,3 +207,200 @@ class WanT2VLowVramPipeline:
         logger.info(f"审计日志已落盘: {meta_filepath}")
 
         return audit_result
+
+    def generate_multi_shots(
+        self,
+        shots: list,
+        concat_output_filename: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        多分镜连续批处理渲染引擎
+        设计原因：
+        避免多镜头视频生成时反复从磁盘加载 8GB 的 DiT 与 VAE 模型。
+        一次性在 CPU 中批量编码所有分镜文本特征，随后加载推理主干并保持常驻，
+        在显存峰值 < 2.8GB 绝对安全水位下，顺序连续去噪渲染各个分镜头，
+        最后可自动通过 FFmpeg 无损合并为完整视频（如 40 帧 5 秒成品）。
+        """
+        logger.info("================== 启动多分镜连续渲染任务 ==================")
+        logger.info(f"分镜总数: {len(shots)} | 画幅: {self.config.width}x{self.config.height} | 步数: {self.config.num_inference_steps}")
+
+        multi_start_time = time.time()
+        self.sentinel.force_clean_memory()
+
+        # ---------------- 阶段 0: 检查分镜完好性，支持断点续跑 ----------------
+        shot_results = []
+        shot_files = []
+        pending_shots = []
+
+        for s in shots:
+            out_name = s.get("output_filename", f"shot_{s['id']}.mp4")
+            out_path = OUTPUT_DIR / out_name
+            if out_path.exists() and out_path.stat().st_size > 10 * 1024:
+                logger.info(f"分镜 [{s['id']}] 视频已存在且完好 ({out_path.name})，跳过去噪与解码，直接复用。")
+                shot_files.append(out_path)
+                shot_results.append({
+                    "id": s["id"],
+                    "output_file": str(out_path),
+                    "frames": s.get("target_num_frames", self.config.target_num_frames) or 8
+                })
+            else:
+                pending_shots.append(s)
+
+        if not pending_shots:
+            logger.info("所有分镜头视频均已完好就绪，直接执行拼接阶段！")
+        else:
+            logger.info(f"本次待渲染分镜数: {len(pending_shots)} / 总分镜数: {len(shots)}")
+
+            # ---------------- 阶段 1: 批量提取待渲染分镜的文本语义特征 (纯 CPU 内存计算) ----------------
+            embeddings_cache = {}
+            with self.sentinel.guard("阶段1_批量CPU文本特征抽取"):
+                logger.info("正在批量使用 CPU 提取全部分镜头文本特征...")
+                for s in pending_shots:
+                    shot_id = s["id"]
+                    prompt_text = s.get("prompt", self.config.prompt)
+                    neg_text = s.get("negative_prompt", self.config.negative_prompt)
+                    logger.info(f"正在编码分镜 [{shot_id}] 提示词...")
+                    p_emb, n_emb = self.text_encoder_mgr.encode_prompt(
+                        prompt=prompt_text,
+                        negative_prompt=neg_text,
+                        target_device=self.device
+                    )
+                    embeddings_cache[shot_id] = {
+                        "prompt_embeds": p_emb,
+                        "negative_prompt_embeds": n_emb
+                    }
+                logger.info(f"已完成 {len(pending_shots)} 个待渲染分镜的文本特征编码！")
+
+            # ---------------- 阶段 2: 构建并加载 Transformer 去噪管线 ----------------
+            with self.sentinel.guard("阶段2_装载低显存模型管线"):
+                from diffusers import WanPipeline, AutoencoderKLWan, WanTransformer3DModel, FlowMatchEulerDiscreteScheduler
+                from transformers import AutoTokenizer
+
+                logger.info("装载 Transformer 主干 (FP16)...")
+                transformer = WanTransformer3DModel.from_pretrained(
+                    str(DIFFUSION_DIR),
+                    torch_dtype=torch.float16
+                ).to(self.device)
+
+                scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                    str(DIFFUSION_DIR),
+                    subfolder=None
+                )
+                tokenizer = AutoTokenizer.from_pretrained(str(self.tokenizer_dir))
+
+                pipe = WanPipeline(
+                    transformer=transformer,
+                    vae=None,
+                    scheduler=scheduler,
+                    tokenizer=tokenizer,
+                    text_encoder=None
+                )
+
+            # ---------------- 阶段 3: 潜空间连续去噪生成分镜头 Latent ----------------
+            latents_cache = {}
+            for idx, shot in enumerate(pending_shots, start=1):
+                shot_id = shot["id"]
+                num_raw_frames = shot.get("num_frames", self.config.num_frames)
+                seed_val = shot.get("seed", self.config.seed)
+
+                logger.info(f"----- [{idx}/{len(pending_shots)}] 潜空间去噪分镜: [{shot_id}] -----")
+                generator = torch.Generator(device="cpu").manual_seed(seed_val) if seed_val is not None else None
+                shot_embeds = embeddings_cache[shot_id]
+
+                with self.sentinel.guard(f"去噪_{shot_id}"):
+                    res = pipe(
+                        prompt=None,
+                        prompt_embeds=shot_embeds["prompt_embeds"],
+                        negative_prompt_embeds=shot_embeds["negative_prompt_embeds"],
+                        height=self.config.height,
+                        width=self.config.width,
+                        num_frames=num_raw_frames,
+                        num_inference_steps=self.config.num_inference_steps,
+                        guidance_scale=self.config.guidance_scale,
+                        generator=generator,
+                        output_type="latent"
+                    )
+                    latents_cache[shot_id] = res.frames.cpu()  # 移至 CPU 内存暂存，零 GPU 显存驻留
+
+                self.sentinel.force_clean_memory()
+
+            # 卸载 Transformer 并完全释放 GPU 显存
+            del pipe, transformer
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info(f"待渲染分镜去噪完成！Transformer 已卸载，当前驻留显存: {torch.cuda.memory_allocated() / 1024**2:.2f}MB")
+
+            # ---------------- 阶段 4: 装载全精度 FP32 VAE 批量解码分镜 ----------------
+            logger.info("装载全精度 FP32 3D Causal VAE 执行无黑块高保真重建...")
+            vae = AutoencoderKLWan.from_pretrained(
+                str(VAE_DIR / "diffusers_vae"),
+                torch_dtype=torch.float32
+            ).to(self.device)
+            vae.enable_slicing()
+
+            with self.sentinel.guard("阶段4_FP32_VAE批量重建视频"):
+                for idx, shot in enumerate(pending_shots, start=1):
+                    shot_id = shot["id"]
+                    target_frames = shot.get("target_num_frames", self.config.target_num_frames)
+                    out_name = shot.get("output_filename", f"shot_{shot_id}.mp4")
+                    out_path = OUTPUT_DIR / out_name
+
+                    logger.info(f"正在全精度解码分镜 [{idx}/{len(pending_shots)}]: [{shot_id}] -> {out_name}...")
+                    shot_latent = latents_cache[shot_id].to(self.device, dtype=torch.float32)
+
+                    with torch.no_grad():
+                        video_tensor = vae.decode(shot_latent).sample
+                        raw_frames = video_tensor[0].permute(1, 2, 3, 0).cpu().numpy()
+                        raw_frames = np.clip((raw_frames + 1.0) / 2.0, 0.0, 1.0)
+                        frames = (raw_frames * 255.0).round().astype(np.uint8)
+
+                    if target_frames is not None and len(frames) > target_frames:
+                        frames = frames[:target_frames]
+
+                    self._export_to_mp4(frames, out_path)
+                    shot_files.append(out_path)
+                    shot_results.append({
+                        "id": shot_id,
+                        "output_file": str(out_path),
+                        "frames": len(frames)
+                    })
+
+            # 释放 VAE
+            del vae
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        # ---------------- 阶段 4: 可选自动拼接 ----------------
+        final_video_path = None
+        if concat_output_filename and len(shot_files) > 1:
+            final_video_path = OUTPUT_DIR / concat_output_filename
+            logger.info(f"正在无损拼接全部 {len(shot_files)} 个分镜至最终成品: {final_video_path}...")
+            import subprocess
+            concat_list = OUTPUT_DIR / "temp_concat_list.txt"
+            with open(concat_list, "w", encoding="utf-8") as f:
+                for sf in shot_files:
+                    f.write(f"file '{sf.resolve().as_posix()}'\n")
+
+            cmd = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-c", "copy",
+                str(final_video_path)
+            ]
+            subprocess.run(cmd, check=True)
+            logger.info(f"拼接完成，最终视频已保存: {final_video_path}")
+
+        total_elapsed = time.time() - multi_start_time
+        memory_info = self.sentinel.get_memory_info()
+
+        multi_audit = {
+            "total_shots": len(shots),
+            "shot_results": shot_results,
+            "final_video": str(final_video_path) if final_video_path else None,
+            "total_elapsed_sec": round(total_elapsed, 2),
+            "gpu_peak_vram_mb": memory_info["gpu_max_allocated_mb"]
+        }
+
+        logger.info(f"多分镜连续渲染全部完成！总耗时: {total_elapsed:.2f}s | 峰值显存: {memory_info['gpu_max_allocated_mb']}MB")
+        return multi_audit
+

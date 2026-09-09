@@ -1,4 +1,4 @@
-﻿import os
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -31,9 +31,10 @@ class VideoGenerationConfig:
     # 尺寸需为 16 的倍数以适配 Wan2.1 3D-VAE 的 8x 下采样与 Patchify 卷积切分
     width: int = 480
     height: int = 272
-    # 帧数设定必须满足 4n + 1 公式（如 33, 49），因 3D Causal VAE 时间轴压缩比为 4:1
-    # 33 帧对应 9 个潜空间时间步，去噪计算负载轻，不易引发显存毛刺
+    # 帧数设定必须满足 4n + 1 公式（如 9, 33, 41, 49），因 3D Causal VAE 时间轴压缩比为 4:1
     num_frames: int = 33
+    # 目标裁切帧数：当设定时，底层按 num_frames (4n+1) 生成，导出时自动精确截断为 target_num_frames
+    target_num_frames: Optional[int] = None
     fps: int = 8
     num_inference_steps: int = 20
     guidance_scale: float = 5.0
@@ -62,9 +63,20 @@ class VideoGenerationConfig:
         if self.width * self.height > 640 * 360:
             raise ValueError(f"当前硬件为 4GB 显存，总像素数量不得超过 640x360（当前请求: {self.width}x{self.height}）")
             
-        # 验证帧数边界：Wan 3D VAE 结构要求 (num_frames - 1) % 4 == 0
+        # 若指定了 target_num_frames，自动校准底层 num_frames 为满足 4n+1 的最小合法整数
+        if self.target_num_frames is not None:
+            if self.target_num_frames <= 0:
+                raise ValueError("目标帧数 target_num_frames 必须为正整数")
+            # 计算 >= target_num_frames 且满足 (N - 1) % 4 == 0 的值
+            remainder = (self.target_num_frames - 1) % 4
+            if remainder == 0:
+                self.num_frames = self.target_num_frames
+            else:
+                self.num_frames = self.target_num_frames + (4 - remainder)
+
+        # 验证底层帧数边界：Wan 3D VAE 结构要求 (num_frames - 1) % 4 == 0
         if (self.num_frames - 1) % 4 != 0:
-            raise ValueError(f"帧数 ({self.num_frames}) 必须满足 (N - 1) % 4 == 0，推荐 33 或 49 帧")
+            raise ValueError(f"底层计算帧数 ({self.num_frames}) 必须满足 (N - 1) % 4 == 0，推荐 33 或 41 帧")
             
         if self.num_frames > 81:
             raise ValueError("4GB 显存下帧数不能超过 81 帧，否则时空注意力张量显存将超限")
