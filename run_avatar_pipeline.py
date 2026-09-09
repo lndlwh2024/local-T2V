@@ -68,7 +68,7 @@ SHOTS_CONFIG = [
 ]
 
 
-def build_shot_item(shot_info: dict, seed: int = 42) -> dict:
+def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "") -> dict:
     """
     构造标准分镜头数据包
     依据 4n+1 数学约束：底层潜空间生成 9 帧，导出时截取前 8 帧对应严格 1 秒 @ 8fps
@@ -82,7 +82,7 @@ def build_shot_item(shot_info: dict, seed: int = 42) -> dict:
         "num_frames": 9,
         "target_num_frames": 8,
         "seed": seed,
-        "output_filename": f"avatar_{shot_id}.mp4",
+        "output_filename": f"{filename_prefix}avatar_{shot_id}.mp4",
         "time": shot_info["time"],
         "sub_line": shot_info["sub_line"]
     }
@@ -95,12 +95,14 @@ def main():
     parser.add_argument("--height", type=int, default=288, help="视频高度（默认 288）")
     parser.add_argument("--steps", type=int, default=20, help="去噪采样步数（20~28 步，默认 20）")
     parser.add_argument("--seed", type=int, default=42, help="随机数种子（固定人物面貌一致性）")
-    parser.add_argument("--output", type=str, default="avatar_speech_5s.mp4", help="最终 5 秒成品视频文件名")
+    parser.add_argument("--prefix", type=str, default="", help="分镜输出文件名前缀（如 fixed_）")
+    parser.add_argument("--force", action="store_true", help="强制重新渲染，不复用已有分镜缓存")
+    parser.add_argument("--output", type=str, default="avatar_speech_5s.mp4", help="最终成品视频文件名")
     args = parser.parse_args()
 
     logger.info("==================================================================")
-    logger.info("  🚀 数字人 5 秒动作卡点视频流水线 (Wan2.1 4GB Low-VRAM 引擎)")
-    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 总帧数: 40 帧 | 步数: {args.steps}")
+    logger.info("  🚀 数字人时序卡点视频流水线 (Wan2.1 4GB Low-VRAM 引擎)")
+    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps}")
     logger.info("==================================================================")
 
     # 准备基础配置
@@ -121,16 +123,24 @@ def main():
     pipeline = WanT2VLowVramPipeline(base_config)
 
     targets_info = [s for s in SHOTS_CONFIG if args.shot == "all" or s["id"] == args.shot]
-    shots_to_render = [build_shot_item(s, seed=args.seed) for s in targets_info]
+    shots_to_render = [build_shot_item(s, seed=args.seed, filename_prefix=args.prefix) for s in targets_info]
+
+    # 若指定了 --force，提前清理对应已有视频文件以确保强制重新渲染
+    if args.force:
+        for s in shots_to_render:
+            target_p = OUTPUT_DIR / s["output_filename"]
+            if target_p.exists():
+                logger.info(f"检测到 --force 参数，删除已有缓存视频以强制重新渲染: {target_p.name}")
+                target_p.unlink()
 
     concat_name = args.output if args.shot == "all" else None
     audit = pipeline.generate_multi_shots(shots_to_render, concat_output_filename=concat_name)
 
-    # 若完成了完整 5 秒合成，自动抽帧提取 5 个关键卡点预览图供审计验证
+    # 关键帧预览抽取
     if audit.get("final_video"):
         final_video_path = audit["final_video"]
         logger.info(f"正在对成品视频 {final_video_path} 提取 1fps 关键帧预览图...")
-        thumb_pattern = str(OUTPUT_DIR / "avatar_5s_thumb_%02d.jpg")
+        thumb_pattern = str(OUTPUT_DIR / f"{args.prefix}avatar_5s_thumb_%02d.jpg")
         cmd = [
             "ffmpeg", "-y", "-i", str(final_video_path),
             "-vf", "fps=1",
@@ -138,6 +148,18 @@ def main():
         ]
         subprocess.run(cmd, capture_output=True)
         logger.info("关键帧预览提取完成！")
+    elif args.shot != "all" and audit.get("shot_results"):
+        single_video = audit["shot_results"][0]["output_file"]
+        logger.info(f"正在为单个分镜头 {single_video} 提取抽帧质量检验图...")
+        preview_jpg = str(OUTPUT_DIR / f"{args.prefix}{args.shot}_preview.jpg")
+        cmd = [
+            "ffmpeg", "-y", "-i", str(single_video),
+            "-vf", "select=eq(n\\,4)",
+            "-vframes", "1",
+            preview_jpg
+        ]
+        subprocess.run(cmd, capture_output=True)
+        logger.info(f"分镜画质预览图已生成: {preview_jpg}")
 
     logger.info("==================================================================")
     logger.info(f" 🎉 任务执行完毕！总耗时: {audit['total_elapsed_sec']}s | 峰值显存: {audit['gpu_peak_vram_mb']}MB")

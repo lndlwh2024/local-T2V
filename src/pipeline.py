@@ -156,10 +156,28 @@ class WanT2VLowVramPipeline:
             vae.enable_slicing()
 
             with torch.no_grad():
-                video_tensor = vae.decode(latents.to(self.device, dtype=torch.float32)).sample
-                # 将形状 [1, 3, T, H, W] 转换为 [T, H, W, 3] uint8
-                raw_frames = video_tensor[0].permute(1, 2, 3, 0).cpu().numpy()
-                raw_frames = np.clip((raw_frames + 1.0) / 2.0, 0.0, 1.0)
+                # 关键修复：潜空间逆归一化（Denormalization）
+                # 设计原因：
+                # DiT 去噪生成的潜空间满足标准正态分布，而 Wan 3D VAE 在训练时针对特定通道均值与标准差进行了规范化。
+                # 解码前必须执行严格的逆归一化变换 (latents / std + mean)，
+                # 否则张量尺度偏离近 3 倍且均值错位，会导致 VAE 反卷积层处于异常激活区，激发出整屏高频斜向水波纹（网格棋盘伪影）。
+                latents_mean = (
+                    torch.tensor(vae.config.latents_mean)
+                    .view(1, vae.config.z_dim, 1, 1, 1)
+                    .to(self.device, dtype=torch.float32)
+                )
+                latents_std = 1.0 / (
+                    torch.tensor(vae.config.latents_std)
+                    .view(1, vae.config.z_dim, 1, 1, 1)
+                    .to(self.device, dtype=torch.float32)
+                )
+                latents_denorm = latents.to(self.device, dtype=torch.float32) / latents_std + latents_mean
+
+                video_tensor = vae.decode(latents_denorm, return_dict=False)[0]
+
+                from diffusers.video_processor import VideoProcessor
+                video_processor = VideoProcessor(vae_scale_factor=vae.config.scale_factor_spatial)
+                raw_frames = video_processor.postprocess_video(video_tensor, output_type="np")[0]
                 video_frames = (raw_frames * 255.0).round().astype(np.uint8)
 
             del vae
@@ -349,9 +367,25 @@ class WanT2VLowVramPipeline:
                     shot_latent = latents_cache[shot_id].to(self.device, dtype=torch.float32)
 
                     with torch.no_grad():
-                        video_tensor = vae.decode(shot_latent).sample
-                        raw_frames = video_tensor[0].permute(1, 2, 3, 0).cpu().numpy()
-                        raw_frames = np.clip((raw_frames + 1.0) / 2.0, 0.0, 1.0)
+                        # 关键修复：执行潜空间反归一化对齐，彻底消除 VAE 水波纹高频网格伪影
+                        # 将标准正态分布的 latents 映射回 VAE 真实训练通道尺度 (latents / std + mean)
+                        latents_mean = (
+                            torch.tensor(vae.config.latents_mean)
+                            .view(1, vae.config.z_dim, 1, 1, 1)
+                            .to(self.device, dtype=torch.float32)
+                        )
+                        latents_std = 1.0 / (
+                            torch.tensor(vae.config.latents_std)
+                            .view(1, vae.config.z_dim, 1, 1, 1)
+                            .to(self.device, dtype=torch.float32)
+                        )
+                        shot_latent_denorm = shot_latent / latents_std + latents_mean
+
+                        video_tensor = vae.decode(shot_latent_denorm, return_dict=False)[0]
+
+                        from diffusers.video_processor import VideoProcessor
+                        video_processor = VideoProcessor(vae_scale_factor=vae.config.scale_factor_spatial)
+                        raw_frames = video_processor.postprocess_video(video_tensor, output_type="np")[0]
                         frames = (raw_frames * 255.0).round().astype(np.uint8)
 
                     if target_frames is not None and len(frames) > target_frames:
