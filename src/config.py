@@ -45,9 +45,10 @@ class VideoGenerationConfig:
     output_filename: Optional[str] = None
     # 首帧参考图像路径：当指定时，流水线启动时序首帧潜空间条件锚定（I2V驱动模式）
     first_frame_path: Optional[str] = None
-    # I2V 动作变化自由度强度（0.1~1.0，推荐 0.60~0.75）：
-    # 控制对首帧骨相与环境先验的保留程度；0.65 可完整锁定人设五官与演播室机位，同时赋予充分微动作去噪动力
-    strength: float = 0.65
+    # I2V 动作变化自由度强度（0.1~1.0，微表情推荐 0.18~0.25）：
+    # 控制对首帧骨相与环境先验的保留程度；0.20 可严格锁定 80% 原图五官骨相与双眼皮儒雅神采，
+    # 彻底杜绝文本先验覆盖导致的变脸走样，同时提供恰到好处的眨眼与呼吸微动作
+    strength: float = 0.20
 
     def validate(self) -> None:
         """

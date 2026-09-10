@@ -73,13 +73,13 @@ SHOTS_CONFIG = [
 ]
 
 
-def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", first_frame_path: str = None, strength: float = 0.65) -> dict:
+def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", first_frame_path: str = None, strength: float = 0.20) -> dict:
     """
     构造标准分镜头数据包
     设计原因：
-    底层锁定 9 帧 (4n+1，n=2)，在首帧潜变量锚定与 strength 先验加噪下严格继承原图人物面貌，
-    配合 FP32 VAE 解码与导出端的自适应保边去隔行滤波，
-    截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
+    底层锁定 9 帧 (4n+1，n=2)，在首帧潜变量锚定与 strength=0.20 先验加噪下严格继承原图人物骨相与五官，
+    保留 80% 真实五官潜变量，杜绝重绘导致的面容走样与大众脸漂移；
+    配合 FP32 VAE 解码、时序对比度保真恢复与自适应保边去条纹滤波，截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
     """
     shot_id = shot_info["id"]
     full_prompt = f"{AVATAR_BASE_PROMPT} Action: {shot_info['action']}"
@@ -104,7 +104,7 @@ def main():
     parser.add_argument("--width", type=int, default=512, help="视频宽度（默认 512）")
     parser.add_argument("--height", type=int, default=288, help="视频高度（默认 288）")
     parser.add_argument("--steps", type=int, default=20, help="去噪采样步数（20~28 步，默认 20）")
-    parser.add_argument("--strength", type=float, default=0.65, help="首帧结构先验去噪强度（0.50~0.80，默认 0.65）")
+    parser.add_argument("--strength", type=float, default=0.20, help="首帧结构先验去噪强度（微表情推荐 0.18~0.25，默认 0.20）")
     parser.add_argument("--seed", type=int, default=42, help="随机数种子（固定人物面貌一致性）")
     parser.add_argument("--prefix", type=str, default="", help="分镜输出文件名前缀（如 fixed_）")
     parser.add_argument("--force", action="store_true", help="强制重新渲染，不复用已有分镜缓存")
@@ -131,10 +131,10 @@ def main():
         target_num_frames=8,
         fps=8,
         num_inference_steps=args.steps,
-        # 恢复官方标准 guidance_scale = 5.0
+        # 调优 guidance_scale = 2.0
         # 设计原因：
-        # 配合首帧时序先验注入，5.0 可提供充沛的微动作引导动力，同时原图先验锁定骨相五官不变形。
-        guidance_scale=5.0,
+        # 在首帧潜变量注入模式下，CFG=2.0 专注于引导眼皮眨动与呼吸微表情，杜绝高 CFG (5.0) 的通用文本先验对抗原图骨相五官。
+        guidance_scale=2.0,
         seed=args.seed,
         vram_limit_gb=3.6
     )
@@ -169,16 +169,46 @@ def main():
         logger.info("关键帧预览提取完成！")
     elif args.shot != "all" and audit.get("shot_results"):
         single_video = audit["shot_results"][0]["output_file"]
-        logger.info(f"正在为单个分镜头 {single_video} 提取抽帧质量检验图...")
-        preview_jpg = str(OUTPUT_DIR / f"{args.prefix}{args.shot}_preview.jpg")
-        cmd = [
-            "ffmpeg", "-y", "-i", str(single_video),
-            "-vf", "select=eq(n\\,4)",
-            "-vframes", "1",
-            preview_jpg
-        ]
-        subprocess.run(cmd, capture_output=True)
-        logger.info(f"分镜画质预览图已生成: {preview_jpg}")
+        logger.info(f"正在为单个分镜头 {single_video} 生成全画幅对比图、面部微距对齐图与动图预览...")
+        import imageio
+        from PIL import Image, ImageDraw, ImageFont
+        try:
+            reader = imageio.get_reader(single_video)
+            v_frames = [f for f in reader]
+            reader.close()
+            if len(v_frames) >= 2:
+                # 1. 导出轻量级预览动图 GIF
+                gif_path = OUTPUT_DIR / f"{args.prefix}{args.shot}_preview.gif"
+                imageio.mimsave(str(gif_path), v_frames, fps=args.fps if hasattr(args, "fps") else 8, loop=0)
+                logger.info(f"动态预览 GIF 已生成: {gif_path}")
+
+                # 2. 抽取首帧（基准）与动作帧（第 4 帧或最后帧）拼合横向全画幅对比
+                f_first = Image.fromarray(v_frames[0])
+                act_idx = min(4, len(v_frames) - 1)
+                f_action = Image.fromarray(v_frames[act_idx])
+                
+                w, h = f_first.size
+                canvas = Image.new("RGB", (w * 2, h))
+                canvas.paste(f_first, (0, 0))
+                canvas.paste(f_action, (w, 0))
+                cmp_path = OUTPUT_DIR / f"{args.prefix}{args.shot}_compare.png"
+                canvas.save(str(cmp_path))
+                logger.info(f"首帧与动作帧并排对比图已生成: {cmp_path}")
+
+                # 3. 抽取面部微距特写对比（验证骨相五官一致性与横波纹消除）
+                # 人脸居中区域大约 x: 180~320, y: 50~220 (140x170)
+                face_box = (180, 50, 320, 220)
+                crop_face_first = f_first.crop(face_box)
+                crop_face_act = f_action.crop(face_box)
+                cw, ch = crop_face_first.size
+                face_canvas = Image.new("RGB", (cw * 2, ch))
+                face_canvas.paste(crop_face_first, (0, 0))
+                face_canvas.paste(crop_face_act, (cw, 0))
+                face_cmp_path = OUTPUT_DIR / f"{args.prefix}{args.shot}_face_alignment.png"
+                face_canvas.save(str(face_cmp_path))
+                logger.info(f"面部微距对齐切片已生成: {face_cmp_path}")
+        except Exception as e:
+            logger.warning(f"生成微距检验图时遇到非致命异常: {e}")
 
     logger.info("==================================================================")
     logger.info(f" 🎉 任务执行完毕！总耗时: {audit['total_elapsed_sec']}s | 峰值显存: {audit['gpu_peak_vram_mb']}MB")
