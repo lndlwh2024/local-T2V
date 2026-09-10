@@ -20,23 +20,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("T2V.AvatarBatch")
 
-# 数字人核心人设固定特征 Prompt 模板
+# 数字人核心人设固定特征基准 Prompt 模板
 # 设计原因：
-# 来源于 media/数字人大图正面.png 像素级解析。经逐版本回溯验证，保留弧形大屏与柔和立体补光环境，
-# 能为模型提供极佳的三维面部高光与阴影支撑，塑造挺拔鼻梁、饱满山根与儒雅神态。
+# 配合时序首帧潜空间条件锚定（I2V驱动模式），正向提示词无需再盲目描摹发型与五官细节，
+# 全面聚焦于演播室柔光环境、真实皮肤质感与清晰画质，为后续帧动作展开提供纯净语义支撑。
 AVATAR_BASE_PROMPT = (
-    "A photorealistic mature Asian man with a very short silver buzz-cut hairstyle, "
-    "groomed salt-and-pepper goatee, wearing a clean plain white crewneck t-shirt with a tiny red chest logo, "
-    "standing in a modern high-tech digital studio with curved giant digital screens displaying glowing blue and purple data visualizations, "
-    "professional studio softbox lighting, 8k resolution, highly detailed skin texture, cinematic quality."
+    "A photorealistic mature Asian man with a natural very short shaved buzz-cut hairstyle, "
+    "neat natural hairline, groomed salt-and-pepper goatee, wearing a clean plain white crewneck t-shirt with a tiny red chest logo, "
+    "standing in a modern high-tech broadcast studio with ambient soft studio lighting, 8k resolution, highly detailed realistic skin texture, cinematic quality."
 )
 
 # 负向提示词清洗
 # 设计原因：
-# 彻底清除此前引入的 pompadour, quiff, floating hairline, bloom 等强排斥性英文词汇，
-# 避免负向排斥向量场破坏面部中庭骨相分布（引发塌鼻与嘴部扭曲），同时保留基础变形与瑕疵拦截。
+# 彻底清除此前引入的所有侵入式发型排斥词（pompadour, quiff）与特效光晕词，
+# 仅保留基础画质与变形防御，杜绝负向排斥向量场破坏面部骨相。
 NEGATIVE_PROMPT = (
-    "色调艳丽，过曝，静态，残影，模糊，扭曲，变形，多余的肢体，多余的手指，融化的物体，低分辨率，卡通，粗糙"
+    "色调艳丽，过曝，残影，模糊，扭曲，变形，多余的肢体，多余的手指，融化的物体，低分辨率，卡通，粗糙，光晕，白雾"
 )
 
 # 对应截图口播文案与 5 秒卡点分镜规划 (5 个镜头各 1 秒)
@@ -45,25 +44,25 @@ SHOTS_CONFIG = [
         "id": "shot_01",
         "time": "0-1s",
         "sub_line": "这一刻，",
-        "action": "The digital avatar materializes from gentle holographic code particles and soft light flares, slowly opening his eyes with a calm and gentle expression, looking forward."
+        "action": "The digital avatar gently and slowly opens his eyes with a calm and confident expression, looking steadily forward at the camera, natural subtle head movement."
     },
     {
         "id": "shot_02",
         "time": "1-2s",
         "sub_line": "我从代码中醒来。",
-        "action": "The digital avatar slightly raises his chin, eyes firmly and confidently focusing directly at the camera lens, natural head motion."
+        "action": "The digital avatar slightly raises his chin, eyes firmly and confidently focusing directly at the camera lens, natural confident expression."
     },
     {
         "id": "shot_03",
         "time": "2-3s",
         "sub_line": "你好，",
-        "action": "The digital avatar gently raises his right hand toward chest level in an elegant welcoming open-palm gesture, friendly smile."
+        "action": "The digital avatar gently raises his right hand toward chest level in an elegant welcoming open-palm gesture, friendly subtle smile."
     },
     {
         "id": "shot_04",
         "time": "3-4s",
         "sub_line": "我是你的",
-        "action": "The digital avatar smiles warmly, nodding his head slightly and politely toward the viewer, welcoming atmosphere."
+        "action": "The digital avatar smiles warmly, nodding his head slightly and politely toward the viewer, welcoming professional posture."
     },
     {
         "id": "shot_05",
@@ -74,11 +73,11 @@ SHOTS_CONFIG = [
 ]
 
 
-def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "") -> dict:
+def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", first_frame_path: str = None, strength: float = 0.65) -> dict:
     """
     构造标准分镜头数据包
     设计原因：
-    底层锁定 9 帧 (4n+1，n=2)，在保持 seed=42 下人脸特征与原图完全一致的同时，
+    底层锁定 9 帧 (4n+1，n=2)，在首帧潜变量锚定与 strength 先验加噪下严格继承原图人物面貌，
     配合 FP32 VAE 解码与导出端的自适应保边去隔行滤波，
     截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
     """
@@ -88,6 +87,8 @@ def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "") 
         "id": shot_id,
         "prompt": full_prompt,
         "negative_prompt": NEGATIVE_PROMPT,
+        "first_frame_path": first_frame_path,
+        "strength": strength,
         "num_frames": 9,
         "target_num_frames": 8,
         "seed": seed,
@@ -103,21 +104,27 @@ def main():
     parser.add_argument("--width", type=int, default=512, help="视频宽度（默认 512）")
     parser.add_argument("--height", type=int, default=288, help="视频高度（默认 288）")
     parser.add_argument("--steps", type=int, default=20, help="去噪采样步数（20~28 步，默认 20）")
+    parser.add_argument("--strength", type=float, default=0.65, help="首帧结构先验去噪强度（0.50~0.80，默认 0.65）")
     parser.add_argument("--seed", type=int, default=42, help="随机数种子（固定人物面貌一致性）")
     parser.add_argument("--prefix", type=str, default="", help="分镜输出文件名前缀（如 fixed_）")
     parser.add_argument("--force", action="store_true", help="强制重新渲染，不复用已有分镜缓存")
+    parser.add_argument("--first-frame", type=str, default="media/数字人大图正面.png", help="首帧参考数字人图像路径（默认 media/数字人大图正面.png）")
     parser.add_argument("--output", type=str, default="avatar_speech_5s.mp4", help="最终成品视频文件名")
     args = parser.parse_args()
 
     logger.info("==================================================================")
     logger.info("  🚀 数字人时序卡点视频流水线 (Wan2.1 4GB Low-VRAM 引擎)")
-    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps}")
+    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength}")
+    if args.first_frame:
+        logger.info(f"  首帧定义: {args.first_frame} (I2V 条件注入模式)")
     logger.info("==================================================================")
 
     # 准备基础配置
     base_config = VideoGenerationConfig(
         prompt=AVATAR_BASE_PROMPT,
         negative_prompt=NEGATIVE_PROMPT,
+        first_frame_path=args.first_frame,
+        strength=args.strength,
         width=args.width,
         height=args.height,
         num_frames=9,
@@ -126,8 +133,7 @@ def main():
         num_inference_steps=args.steps,
         # 恢复官方标准 guidance_scale = 5.0
         # 设计原因：
-        # 过低的 guidance_scale (3.2) 会严重削弱提示词对人脸骨相与微小五官的控制力，导致鼻孔与鼻梁高光无法充分收敛。
-        # 恢复 5.0 能为面部中庭微结构提供充足的去噪主导动力，恢复挺拔五官与俊朗面容。
+        # 配合首帧时序先验注入，5.0 可提供充沛的微动作引导动力，同时原图先验锁定骨相五官不变形。
         guidance_scale=5.0,
         seed=args.seed,
         vram_limit_gb=3.6
@@ -136,7 +142,7 @@ def main():
     pipeline = WanT2VLowVramPipeline(base_config)
 
     targets_info = [s for s in SHOTS_CONFIG if args.shot == "all" or s["id"] == args.shot]
-    shots_to_render = [build_shot_item(s, seed=args.seed, filename_prefix=args.prefix) for s in targets_info]
+    shots_to_render = [build_shot_item(s, seed=args.seed, filename_prefix=args.prefix, first_frame_path=args.first_frame, strength=args.strength) for s in targets_info]
 
     # 若指定了 --force，提前清理对应已有视频文件以确保强制重新渲染
     if args.force:

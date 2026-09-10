@@ -43,6 +43,11 @@ class VideoGenerationConfig:
     # 物理显存安全警戒线：4096MB 显存需扣除系统合成器及驱动保留的 ~400MB，故硬锁定在 3.6GB
     vram_limit_gb: float = 3.6
     output_filename: Optional[str] = None
+    # 首帧参考图像路径：当指定时，流水线启动时序首帧潜空间条件锚定（I2V驱动模式）
+    first_frame_path: Optional[str] = None
+    # I2V 动作变化自由度强度（0.1~1.0，推荐 0.60~0.75）：
+    # 控制对首帧骨相与环境先验的保留程度；0.65 可完整锁定人设五官与演播室机位，同时赋予充分微动作去噪动力
+    strength: float = 0.65
 
     def validate(self) -> None:
         """
@@ -51,6 +56,17 @@ class VideoGenerationConfig:
         """
         if not self.prompt or not self.prompt.strip():
             raise ValueError("Prompt 提示词不能为空")
+            
+        if not (0.0 < self.strength <= 1.0):
+            raise ValueError(f"去噪强度 strength 必须在 (0.0, 1.0] 之间，当前为: {self.strength}")
+
+        # 首帧文件存在性与类型边界校验
+        if self.first_frame_path is not None:
+            p = Path(self.first_frame_path)
+            if not p.exists():
+                raise FileNotFoundError(f"首帧参考图像文件不存在: {self.first_frame_path}")
+            if p.suffix.lower() not in [".png", ".jpg", ".jpeg", ".webp"]:
+                raise ValueError(f"首帧参考图像必须为常见图片格式 (.png, .jpg, .jpeg, .webp)，当前为: {p.suffix}")
         
         # 限制 prompt 最大长度，防止恶意长文本注入耗尽 CPU 内存与 Tokenizer 资源
         if len(self.prompt) > 1000:
