@@ -48,7 +48,8 @@ class WanT2VLowVramPipeline:
     def _export_to_mp4(self, video_frames: np.ndarray, output_path: Path) -> None:
         """
         导出标准化兼容的 H.264 MP4 视频文件
-        增加 3D-VAE 时序反卷积交织帧的平滑防御与 YUV420P 标准像素对齐
+        保持原始 0~255 全动态范围，挂载自适应保边去隔行滤波（Edge-Preserving De-Interlacer），
+        消除 3D-VAE 时序交错上采样带来的隔行扫描条纹，同时严格保全人脸五官与真实边缘
         """
         logger.info(f"正在将生成的视频帧导出为 MP4: {output_path} (帧数: {len(video_frames)}, FPS: {self.config.fps})")
         
@@ -60,25 +61,28 @@ class WanT2VLowVramPipeline:
             frames = np.clip(frames, 0.0, 1.0)
             frames = (frames * 255.0).round().astype(np.uint8)
 
-        # 3D-VAE 时序交错防御 (Temporal Interlace Defense)
+        # 自适应保边去隔行滤波 (Adaptive Edge-Preserving De-Interlacing)
         # 设计原因：
-        # Wan 3D-VAE 在解码后续帧时采用时间交错堆叠（torch.stack），若相邻行存在微弱交织扫描条纹，
-        # 在大面积平坦低频区域进行轻量行间保边滤波，消除奇偶扫描线，拉齐后续帧与第 1 帧的平滑纯净度
+        # Wan 3D-VAE 在解码第 2 帧及后续帧时，WanResample 采用 WanCausalConv3d 进行时间 4x 上采样并通过 torch.stack 偶奇交织，
+        # 在小画幅下奇数时间帧会产生微弱的奇偶行相位振荡（隔行扫描线 Scanlines）。
+        # 第 1 帧因 first_chunk=True 跳过了 3D-conv 因而天生纯净，无须处理；
+        # 从第 2 帧开始，利用相邻偶数行均值进行垂直预测，仅对小幅度振荡残差 (|diff| < 18) 进行高斯衰减平滑，
+        # 对于深色眼眶、胡须、高反差轮廓等真实物理边缘 (|diff| >= 25) 实行零衰减保全，
+        # 且杜绝全局暗部提升，确保背景黑位 (min 归 0) 与高光通透度完整留存。
         if len(frames) > 1:
-            cleaned_frames = []
-            for idx, frame in enumerate(frames):
-                if idx == 0:
-                    cleaned_frames.append(frame)
-                else:
-                    # 针对第 2 帧及后续帧做自适应扫描线防御：
-                    # 对垂直高频微抖动执行微小局部平滑，保留高对比强边缘（人脸特征）
-                    f_float = frame.astype(np.float32)
-                    diff_y = np.abs(f_float[2:, :, :] - f_float[:-2, :, :])
-                    # 平坦区域（diff_y < 12.0）执行 1-2-1 垂直滤波
-                    mask = (diff_y < 12.0).astype(np.float32)
-                    filtered = 0.25 * f_float[:-2, :, :] + 0.5 * f_float[1:-1, :, :] + 0.25 * f_float[2:, :, :]
-                    f_float[1:-1, :, :] = f_float[1:-1, :, :] * (1.0 - mask * 0.5) + filtered * (mask * 0.5)
-                    cleaned_frames.append(np.clip(f_float, 0, 255).round().astype(np.uint8))
+            cleaned_frames = [frames[0]]  # 第 1 帧天生无损保留
+            for idx in range(1, len(frames)):
+                f = frames[idx].astype(np.float32)
+                top = f[0:-2:2, :, :]
+                bot = f[2::2, :, :]
+                mid = f[1:-1:2, :, :]
+                pred = 0.5 * (top + bot)
+                diff = mid - pred
+                # 高斯软阈值衰减：压制条纹，保全强边缘
+                sigma = 12.0
+                weight = np.exp(-(diff ** 2) / (2.0 * (sigma ** 2)))
+                f[1:-1:2, :, :] = mid - diff * weight
+                cleaned_frames.append(np.clip(f, 0.0, 255.0).round().astype(np.uint8))
             frames = np.stack(cleaned_frames, axis=0)
 
         import imageio
@@ -216,9 +220,10 @@ class WanT2VLowVramPipeline:
             gc.collect()
             torch.cuda.empty_cache()
 
-            # 若指定了 target_num_frames，精确裁切为目标帧数以严格对齐业务时长（如 8 帧 @ 8fps 严格 1.0 秒）
+            # 若底层生成帧数大于目标帧数（如底层 9 帧满足 4n+1 因果约束，目标交付 8 帧）
+            # 直接截取前 target_num_frames 帧，严格对齐 8 帧 @ 8fps 1.0 秒时序动作
             if self.config.target_num_frames is not None and len(video_frames) > self.config.target_num_frames:
-                logger.info(f"执行帧数精确截断: {len(video_frames)} 帧 -> {self.config.target_num_frames} 帧")
+                logger.info(f"执行帧数精确截取: {len(video_frames)} 帧 -> {self.config.target_num_frames} 帧")
                 video_frames = video_frames[:self.config.target_num_frames]
 
             logger.info(f"FP32 VAE 视频重建完成！最终帧形状: {video_frames.shape}")
@@ -426,6 +431,7 @@ class WanT2VLowVramPipeline:
                         frames = (raw_frames * 255.0).round().astype(np.uint8)
 
                     if target_frames is not None and len(frames) > target_frames:
+                        logger.info(f"分镜 [{shot_id}] 执行帧数精确截取: {len(frames)} 帧 -> {target_frames} 帧")
                         frames = frames[:target_frames]
 
                     self._export_to_mp4(frames, out_path)

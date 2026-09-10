@@ -21,16 +21,18 @@ logging.basicConfig(
 logger = logging.getLogger("T2V.AvatarBatch")
 
 # 数字人核心人设固定特征 Prompt 模板
-# 来源于 media/数字人大图正面.png 与 数字人多角度.png 的像素级解析
+# 来源于 media/数字人大图正面.png 像素级精准复刻：贴头皮超短圆寸，平直自然发际线，杜绝高耸飞机头与体积光晕
 AVATAR_BASE_PROMPT = (
     "A photorealistic mature Asian man with a very short silver buzz-cut hairstyle, "
     "groomed salt-and-pepper goatee, wearing a clean plain white crewneck t-shirt with a tiny red chest logo, "
     "standing in a modern high-tech digital studio with a smooth solid gradient blue and purple backdrop, "
-    "gentle atmospheric volumetric soft lighting, professional studio softbox lighting, 8k resolution, highly detailed skin texture, cinematic quality."
+    "clean studio lighting, professional studio softbox lighting, 8k resolution, highly detailed skin texture, cinematic quality."
 )
 
 NEGATIVE_PROMPT = (
-    "重影，残影，双重轮廓，摩尔纹，横纹，条纹，扫描线，网格伪影，水波纹，过度曝光，高对比边缘干涉，毛刺，肢体扭曲，多余的手指，融化的物体，低分辨率，卡通，粗糙"
+    "重影，残影，双重轮廓，发际线重影，发光边缘，泛光，白雾，光晕，摩尔纹，横纹，条纹，扫描线，网格伪影，水波纹，过度曝光，高对比边缘干涉，毛刺，肢体扭曲，低分辨率，卡通，粗糙，"
+    "pompadour, quiff, slicked back hair, high hair volume, elevated hair, floating hairline, double hairline, ghosting, "
+    "bloom, haze, glowing aura, white flare, volumetric light"
 )
 
 # 对应截图口播文案与 5 秒卡点分镜规划 (5 个镜头各 1 秒)
@@ -39,7 +41,7 @@ SHOTS_CONFIG = [
         "id": "shot_01",
         "time": "0-1s",
         "sub_line": "这一刻，",
-        "action": "The digital avatar materializes from gentle holographic code particles and soft light flares, slowly opening his eyes with a calm and gentle expression, looking forward."
+        "action": "The digital avatar slowly opens his eyes with a calm and gentle expression, looking forward steadily."
     },
     {
         "id": "shot_02",
@@ -71,7 +73,10 @@ SHOTS_CONFIG = [
 def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "") -> dict:
     """
     构造标准分镜头数据包
-    依据 4n+1 数学约束：底层潜空间生成 9 帧，导出时截取前 8 帧对应严格 1 秒 @ 8fps
+    设计原因：
+    底层锁定 9 帧 (4n+1，n=2)，在保持 seed=42 下人脸特征与原图完全一致的同时，
+    配合 FP32 VAE 解码与导出端的自适应保边去隔行滤波，
+    截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
     """
     shot_id = shot_info["id"]
     full_prompt = f"{AVATAR_BASE_PROMPT} Action: {shot_info['action']}"

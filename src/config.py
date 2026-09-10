@@ -64,16 +64,17 @@ class VideoGenerationConfig:
         if self.width * self.height > 640 * 360:
             raise ValueError(f"当前硬件为 4GB 显存，总像素数量不得超过 640x360（当前请求: {self.width}x{self.height}）")
             
-        # 若指定了 target_num_frames，自动校准底层 num_frames 为满足 4n+1 的最小合法整数
+        # 若指定了 target_num_frames，确保底层 num_frames 合法且不小于 target_num_frames
         if self.target_num_frames is not None:
             if self.target_num_frames <= 0:
                 raise ValueError("目标帧数 target_num_frames 必须为正整数")
-            # 计算 >= target_num_frames 且满足 (N - 1) % 4 == 0 的值
-            remainder = (self.target_num_frames - 1) % 4
-            if remainder == 0:
-                self.num_frames = self.target_num_frames
-            else:
-                self.num_frames = self.target_num_frames + (4 - remainder)
+            # 若当前 num_frames 已经满足 4n+1 约束且 >= target_num_frames，则保留该原生高帧率设置（如 17 帧）
+            if not ((self.num_frames - 1) % 4 == 0 and self.num_frames >= self.target_num_frames):
+                remainder = (self.target_num_frames - 1) % 4
+                if remainder == 0:
+                    self.num_frames = self.target_num_frames
+                else:
+                    self.num_frames = self.target_num_frames + (4 - remainder)
 
         # 验证底层帧数边界：Wan 3D VAE 结构要求 (num_frames - 1) % 4 == 0
         if (self.num_frames - 1) % 4 != 0:
