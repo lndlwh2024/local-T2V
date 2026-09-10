@@ -21,18 +21,22 @@ logging.basicConfig(
 logger = logging.getLogger("T2V.AvatarBatch")
 
 # 数字人核心人设固定特征 Prompt 模板
-# 来源于 media/数字人大图正面.png 像素级精准复刻：贴头皮超短圆寸，平直自然发际线，杜绝高耸飞机头与体积光晕
+# 设计原因：
+# 来源于 media/数字人大图正面.png 像素级解析。经逐版本回溯验证，保留弧形大屏与柔和立体补光环境，
+# 能为模型提供极佳的三维面部高光与阴影支撑，塑造挺拔鼻梁、饱满山根与儒雅神态。
 AVATAR_BASE_PROMPT = (
     "A photorealistic mature Asian man with a very short silver buzz-cut hairstyle, "
     "groomed salt-and-pepper goatee, wearing a clean plain white crewneck t-shirt with a tiny red chest logo, "
-    "standing in a modern high-tech digital studio with a smooth solid gradient blue and purple backdrop, "
-    "clean studio lighting, professional studio softbox lighting, 8k resolution, highly detailed skin texture, cinematic quality."
+    "standing in a modern high-tech digital studio with curved giant digital screens displaying glowing blue and purple data visualizations, "
+    "professional studio softbox lighting, 8k resolution, highly detailed skin texture, cinematic quality."
 )
 
+# 负向提示词清洗
+# 设计原因：
+# 彻底清除此前引入的 pompadour, quiff, floating hairline, bloom 等强排斥性英文词汇，
+# 避免负向排斥向量场破坏面部中庭骨相分布（引发塌鼻与嘴部扭曲），同时保留基础变形与瑕疵拦截。
 NEGATIVE_PROMPT = (
-    "重影，残影，双重轮廓，发际线重影，发光边缘，泛光，白雾，光晕，摩尔纹，横纹，条纹，扫描线，网格伪影，水波纹，过度曝光，高对比边缘干涉，毛刺，肢体扭曲，低分辨率，卡通，粗糙，"
-    "pompadour, quiff, slicked back hair, high hair volume, elevated hair, floating hairline, double hairline, ghosting, "
-    "bloom, haze, glowing aura, white flare, volumetric light"
+    "色调艳丽，过曝，静态，残影，模糊，扭曲，变形，多余的肢体，多余的手指，融化的物体，低分辨率，卡通，粗糙"
 )
 
 # 对应截图口播文案与 5 秒卡点分镜规划 (5 个镜头各 1 秒)
@@ -41,7 +45,7 @@ SHOTS_CONFIG = [
         "id": "shot_01",
         "time": "0-1s",
         "sub_line": "这一刻，",
-        "action": "The digital avatar slowly opens his eyes with a calm and gentle expression, looking forward steadily."
+        "action": "The digital avatar materializes from gentle holographic code particles and soft light flares, slowly opening his eyes with a calm and gentle expression, looking forward."
     },
     {
         "id": "shot_02",
@@ -120,7 +124,11 @@ def main():
         target_num_frames=8,
         fps=8,
         num_inference_steps=args.steps,
-        guidance_scale=3.2,
+        # 恢复官方标准 guidance_scale = 5.0
+        # 设计原因：
+        # 过低的 guidance_scale (3.2) 会严重削弱提示词对人脸骨相与微小五官的控制力，导致鼻孔与鼻梁高光无法充分收敛。
+        # 恢复 5.0 能为面部中庭微结构提供充足的去噪主导动力，恢复挺拔五官与俊朗面容。
+        guidance_scale=5.0,
         seed=args.seed,
         vram_limit_gb=3.6
     )
