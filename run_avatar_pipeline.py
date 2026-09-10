@@ -25,12 +25,12 @@ logger = logging.getLogger("T2V.AvatarBatch")
 AVATAR_BASE_PROMPT = (
     "A photorealistic mature Asian man with a very short silver buzz-cut hairstyle, "
     "groomed salt-and-pepper goatee, wearing a clean plain white crewneck t-shirt with a tiny red chest logo, "
-    "standing in a modern high-tech digital studio with curved giant digital screens displaying glowing blue and purple data visualizations, "
-    "professional studio softbox lighting, 8k resolution, highly detailed skin texture, cinematic quality."
+    "standing in a modern high-tech digital studio with a smooth solid gradient blue and purple backdrop, "
+    "gentle atmospheric volumetric soft lighting, professional studio softbox lighting, 8k resolution, highly detailed skin texture, cinematic quality."
 )
 
 NEGATIVE_PROMPT = (
-    "色调艳丽，过曝，静态，残影，模糊，扭曲，变形，多余的肢体，多余的手指，融化的物体，低分辨率，卡通，粗糙"
+    "重影，残影，双重轮廓，摩尔纹，横纹，条纹，扫描线，网格伪影，水波纹，过度曝光，高对比边缘干涉，毛刺，肢体扭曲，多余的手指，融化的物体，低分辨率，卡通，粗糙"
 )
 
 # 对应截图口播文案与 5 秒卡点分镜规划 (5 个镜头各 1 秒)
@@ -115,7 +115,7 @@ def main():
         target_num_frames=8,
         fps=8,
         num_inference_steps=args.steps,
-        guidance_scale=5.0,
+        guidance_scale=3.2,
         seed=args.seed,
         vram_limit_gb=3.6
     )

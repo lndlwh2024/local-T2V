@@ -48,6 +48,7 @@ class WanT2VLowVramPipeline:
     def _export_to_mp4(self, video_frames: np.ndarray, output_path: Path) -> None:
         """
         导出标准化兼容的 H.264 MP4 视频文件
+        增加 3D-VAE 时序反卷积交织帧的平滑防御与 YUV420P 标准像素对齐
         """
         logger.info(f"正在将生成的视频帧导出为 MP4: {output_path} (帧数: {len(video_frames)}, FPS: {self.config.fps})")
         
@@ -59,13 +60,35 @@ class WanT2VLowVramPipeline:
             frames = np.clip(frames, 0.0, 1.0)
             frames = (frames * 255.0).round().astype(np.uint8)
 
+        # 3D-VAE 时序交错防御 (Temporal Interlace Defense)
+        # 设计原因：
+        # Wan 3D-VAE 在解码后续帧时采用时间交错堆叠（torch.stack），若相邻行存在微弱交织扫描条纹，
+        # 在大面积平坦低频区域进行轻量行间保边滤波，消除奇偶扫描线，拉齐后续帧与第 1 帧的平滑纯净度
+        if len(frames) > 1:
+            cleaned_frames = []
+            for idx, frame in enumerate(frames):
+                if idx == 0:
+                    cleaned_frames.append(frame)
+                else:
+                    # 针对第 2 帧及后续帧做自适应扫描线防御：
+                    # 对垂直高频微抖动执行微小局部平滑，保留高对比强边缘（人脸特征）
+                    f_float = frame.astype(np.float32)
+                    diff_y = np.abs(f_float[2:, :, :] - f_float[:-2, :, :])
+                    # 平坦区域（diff_y < 12.0）执行 1-2-1 垂直滤波
+                    mask = (diff_y < 12.0).astype(np.float32)
+                    filtered = 0.25 * f_float[:-2, :, :] + 0.5 * f_float[1:-1, :, :] + 0.25 * f_float[2:, :, :]
+                    f_float[1:-1, :, :] = f_float[1:-1, :, :] * (1.0 - mask * 0.5) + filtered * (mask * 0.5)
+                    cleaned_frames.append(np.clip(f_float, 0, 255).round().astype(np.uint8))
+            frames = np.stack(cleaned_frames, axis=0)
+
         import imageio
         imageio.mimwrite(
             str(output_path),
             frames,
             fps=self.config.fps,
             codec="libx264",
-            quality=8
+            quality=9,
+            ffmpeg_params=["-pix_fmt", "yuv420p"]
         )
         logger.info(f"MP4 视频导出完成: {output_path}")
 
@@ -96,7 +119,8 @@ class WanT2VLowVramPipeline:
 
         # ---------------- 阶段 2: 构建并加载优化去噪主干 (DiT 独占 GPU) ----------------
         with self.sentinel.guard("阶段2_装载低显存模型管线"):
-            from diffusers import WanPipeline, AutoencoderKLWan, WanTransformer3DModel, FlowMatchEulerDiscreteScheduler
+            from diffusers import WanPipeline, AutoencoderKLWan, WanTransformer3DModel
+            from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
             from transformers import AutoTokenizer
 
             logger.info("装载 Transformer 去噪主干 (FP16)...")
@@ -105,9 +129,17 @@ class WanT2VLowVramPipeline:
                 torch_dtype=torch.float16
             ).to(self.device)
 
-            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            # 核心算法重构：切换为 Wan2.1 官方原生二阶预测-校正求解器 UniPCMultistepScheduler
+            # 设计原因：
+            # 原 FlowMatchEuler 为一阶粗暴采样，在低噪声阶段 (t < 500) 缺乏微步采样，导致高频截断残差固化在潜空间中，
+            # 经过 3D-VAE 反卷积后在白色 T 恤等平坦区域产生横向条纹。
+            # UniPC 在低噪声区间分配密集微步长，并在 20 步下以二阶预测校正保证数值稳定收敛。
+            scheduler = UniPCMultistepScheduler.from_pretrained(
                 str(DIFFUSION_DIR),
-                subfolder=None
+                subfolder=None,
+                flow_shift=3.0,
+                solver_order=2,
+                prediction_type="flow_prediction"
             )
             tokenizer = AutoTokenizer.from_pretrained(str(self.tokenizer_dir))
 
@@ -291,7 +323,8 @@ class WanT2VLowVramPipeline:
 
             # ---------------- 阶段 2: 构建并加载 Transformer 去噪管线 ----------------
             with self.sentinel.guard("阶段2_装载低显存模型管线"):
-                from diffusers import WanPipeline, AutoencoderKLWan, WanTransformer3DModel, FlowMatchEulerDiscreteScheduler
+                from diffusers import WanPipeline, AutoencoderKLWan, WanTransformer3DModel
+                from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
                 from transformers import AutoTokenizer
 
                 logger.info("装载 Transformer 主干 (FP16)...")
@@ -300,9 +333,13 @@ class WanT2VLowVramPipeline:
                     torch_dtype=torch.float16
                 ).to(self.device)
 
-                scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                # 核心算法重构：使用官方二阶预测-校正求解器 UniPCMultistepScheduler
+                scheduler = UniPCMultistepScheduler.from_pretrained(
                     str(DIFFUSION_DIR),
-                    subfolder=None
+                    subfolder=None,
+                    flow_shift=3.0,
+                    solver_order=2,
+                    prediction_type="flow_prediction"
                 )
                 tokenizer = AutoTokenizer.from_pretrained(str(self.tokenizer_dir))
 

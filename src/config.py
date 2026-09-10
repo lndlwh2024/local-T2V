@@ -37,7 +37,8 @@ class VideoGenerationConfig:
     target_num_frames: Optional[int] = None
     fps: int = 8
     num_inference_steps: int = 20
-    guidance_scale: float = 5.0
+    # 引导强度设为 3.2，消除高 CFG (5.0) 引起的边缘吉布斯振铃、双重发际线重影与高频干涉
+    guidance_scale: float = 3.2
     seed: Optional[int] = 42
     # 物理显存安全警戒线：4096MB 显存需扣除系统合成器及驱动保留的 ~400MB，故硬锁定在 3.6GB
     vram_limit_gb: float = 3.6
