@@ -74,7 +74,15 @@ SHOTS_CONFIG = [
 ]
 
 
-def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", first_frame_path: str = None, strength: float = 0.20, enable_temporal_anchoring: bool = True) -> dict:
+def build_shot_item(
+    shot_info: dict,
+    seed: int = 42,
+    filename_prefix: str = "",
+    first_frame_path: str = None,
+    strength: float = 0.20,
+    enable_temporal_anchoring: bool = True,
+    enable_post_processing: bool = True
+) -> dict:
     """
     构造标准分镜头数据包
     设计原因：
@@ -90,6 +98,7 @@ def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", 
         "first_frame_path": first_frame_path,
         "strength": strength,
         "enable_temporal_anchoring": enable_temporal_anchoring,
+        "enable_post_processing": enable_post_processing,
         "num_frames": 9,
         "target_num_frames": 8,
         "seed": seed,
@@ -112,14 +121,17 @@ def main():
     parser.add_argument("--first-frame", type=str, default="media/数字人大图正面.png", help="首帧参考数字人图像路径（默认 media/数字人大图正面.png）")
     parser.add_argument("--output", type=str, default="avatar_speech_5s.mp4", help="最终成品视频文件名")
     parser.add_argument("--no-temporal-anchor", action="store_true", help="关闭 Progressive Temporal Identity Anchoring (实验 A1)")
-    parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_A1）")
+    parser.add_argument("--no-post-process", action="store_true", help="关闭后处理与逐帧自动归一化，仅输出原始解码结果 (实验 B1)")
+    parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_A1 或 run_B1_raw_decode）")
     args = parser.parse_args()
 
     enable_anchor = not args.no_temporal_anchor
+    enable_post = not args.no_post_process
     logger.info("==================================================================")
     logger.info("  🚀 数字人时序卡点视频流水线 (Wan2.1 原生 832x480 电影级引擎)")
     logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength}")
     logger.info(f"  潜空间时序锚定: {'【已关闭】(实验 A1: Frame 1~8 anchor_weight = 0)' if not enable_anchor else '【开启】(渐进软锚定 85%/80%)'}")
+    logger.info(f"  后处理管线: {'【已彻底关闭】(实验 B1: 跳过对比度校准与垂直滤波，禁止逐帧归一化，仅输出 raw decode 帧)' if not enable_post else '【开启】(时序动态对比度校准 + 自适应垂直保边滤波)'}")
     if args.first_frame:
         logger.info(f"  首帧定义: {args.first_frame} (I2V 条件注入模式)")
     logger.info("==================================================================")
@@ -131,6 +143,7 @@ def main():
         first_frame_path=args.first_frame,
         strength=args.strength,
         enable_temporal_anchoring=enable_anchor,
+        enable_post_processing=enable_post,
         width=args.width,
         height=args.height,
         num_frames=9,
@@ -155,7 +168,8 @@ def main():
             filename_prefix=args.prefix,
             first_frame_path=args.first_frame,
             strength=args.strength,
-            enable_temporal_anchoring=enable_anchor
+            enable_temporal_anchoring=enable_anchor,
+            enable_post_processing=enable_post
         ) for s in targets_info
     ]
 
@@ -355,6 +369,29 @@ def main():
                     f"   否 (False)。去噪迭代中仅对 Slice 0 使用对应噪声水平的 target_f0，Slice 1 与 Slice 2 无混合；解码前对 Slice 0 整体直接替换。",
                     "",
                     "=" * 80,
+                    "【后处理与解码链路状态 (实验 B1 核心审计)】",
+                    f"A. 后处理执行状态:",
+                    f"   - temporal_contrast_restoration_executed = {diag.get('temporal_contrast_restoration_executed', False)}",
+                    f"   - adaptive_destripe_filter_executed = {diag.get('adaptive_destripe_filter_executed', False)}",
+                    f"   - frame_level_normalization_exists = {diag.get('frame_level_normalization_exists', False)}",
+                    "",
+                    f"B. 帧亮度统计 (光度学公式: Y = 0.299*R + 0.587*G + 0.114*B):",
+                ]
+
+                luma_stats = diag.get("frames_luma_stats", {})
+                for f_i in range(1, 8):
+                    f_key = f"frame_{f_i}"
+                    st = luma_stats.get(f_key, {})
+                    diag_lines.append(f"   - Frame {f_i}: mean_luma_before = {st.get('mean_luma_before', 'N/A')}, std_luma_before = {st.get('std_luma_before', 'N/A')}")
+
+                diag_lines.extend([
+                    "",
+                    f"C. 残留路径说明:",
+                    f"   {diag.get('residual_path_note', '除 VAE 原始解码与固定线性变换外，不存在任何隐式色彩/滤波处理。')}",
+                    "",
+                    f"D. 输出链路说明:",
+                    f"   {diag.get('output_pipeline_note', '当前导出的是 raw decoded frames，无后处理')}",
+                    "=" * 80,
                     "【恒定实验参数清单】",
                     f"- 模型架构: Wan2.1-1.3B FP16 DiT + UMT5-XXL FP8 + FP32 3D-VAE",
                     f"- Prompt: {AVATAR_BASE_PROMPT}",
@@ -365,10 +402,10 @@ def main():
                     f"- 步数: {args.steps}",
                     f"- Strength: {args.strength}",
                     f"- CFG (guidance_scale): 2.0",
-                    f"- 后处理: 保持原样 (时序对比度校准 + 自适应垂直保边滤波)",
+                    f"- 后处理: {'【已彻底关闭】(跳过对比度恢复与垂直滤波，无逐帧归一化，仅输出 raw decode 帧)' if not enable_post else '开启 (时序对比度校准 + 自适应垂直保边滤波)'}",
                     f"- 显存机制: CPU/GPU 内存解耦换入换出",
                     "=" * 80,
-                ]
+                ])
                 config_content = "\n".join(diag_lines)
 
                 run_cfg_path = exp_dir / "run_config.txt"
@@ -383,8 +420,19 @@ def main():
                     f.write(config_content)
                 logger.info("  run_debug.txt 已同步保存至工作区根目录！")
 
-                # 按照用户要求在控制台直接打印关键去噪执行指标
+                # 按照用户要求在控制台直接打印关键去噪执行指标与实验 B1 诊断指标
                 logger.info("==================================================================")
+                logger.info("  【实验 B1 关键诊断指标控制台汇总】")
+                logger.info(f"  1. 后处理状态: temporal_contrast_restoration_executed = {diag.get('temporal_contrast_restoration_executed', False)}")
+                logger.info(f"                 adaptive_destripe_filter_executed = {diag.get('adaptive_destripe_filter_executed', False)}")
+                logger.info(f"                 frame_level_normalization_exists = {diag.get('frame_level_normalization_exists', False)}")
+                logger.info(f"  2. 输出链路:   {diag.get('output_pipeline_note', '当前导出的是 raw decoded frames，无后处理')}")
+                logger.info(f"  3. 残留路径:   {diag.get('residual_path_note', '除 VAE 原始解码与固定线性变换外无隐式色彩/滤波处理')}")
+                logger.info("  4. 帧亮度统计 (Frame 1 ~ 7 光度学亮度均值与标准差):")
+                for f_i in range(1, 8):
+                    st = luma_stats.get(f"frame_{f_i}", {})
+                    logger.info(f"     Frame {f_i}: mean_luma_before = {st.get('mean_luma_before', 'N/A')}, std_luma_before = {st.get('std_luma_before', 'N/A')}")
+                logger.info("------------------------------------------------------------------")
                 logger.info(f"  configured_num_inference_steps = {args.steps}")
                 logger.info(f"  strength = {args.strength:.2f}")
                 logger.info(f"  actual_iteration_count = {diag.get('actual_iteration_count', diag.get('actual_timesteps_len'))}")

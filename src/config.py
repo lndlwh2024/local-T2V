@@ -56,6 +56,10 @@ class VideoGenerationConfig:
     # 控制是否对 Slice 1 (第1~4帧) 与 Slice 2 (第5~8帧) 实施骨相强阻尼约束；
     # 实验 A1 中将其设为 False (anchor_weight = 0)，单独检验软锚定对波纹和重影的影响
     enable_temporal_anchoring: bool = True
+    # 视频后处理管线开关 (Post-Processing Pipeline)
+    # 控制是否启用时序动态范围恢复 (Temporal Contrast Restoration) 与自适应保边去条纹滤波 (Adaptive De-Stripe Filter)；
+    # 实验 B1 中将其设为 False，彻底旁路所有后处理与逐帧重映射，仅导出固定线性映射的原始解码帧 (Raw Decoded Frames)
+    enable_post_processing: bool = True
 
     def validate(self) -> None:
         """

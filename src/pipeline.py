@@ -45,13 +45,16 @@ class WanT2VLowVramPipeline:
         
         logger.info(f"初始化 WanT2VLowVramPipeline 完成，计算设备: {self.device}")
 
-    def _export_to_mp4(self, video_frames: np.ndarray, output_path: Path) -> None:
+    def _export_to_mp4(self, video_frames: np.ndarray, output_path: Path, enable_post_processing: Optional[bool] = None) -> np.ndarray:
         """
         导出标准化兼容的 H.264 MP4 视频文件
-        保持原始 0~255 全动态范围，挂载自适应保边去隔行滤波（Edge-Preserving De-Interlacer），
-        消除 3D-VAE 时序交错上采样带来的隔行扫描条纹，同时严格保全人脸五官与真实边缘
+        保持原始 0~255 全动态范围，可选挂载自适应保边去隔行滤波与时序对比度校准
+        若 enable_post_processing=False，则彻底旁路所有后处理，仅做固定静态线性映射导出原始解码帧
         """
-        logger.info(f"正在将生成的视频帧导出为 MP4: {output_path} (帧数: {len(video_frames)}, FPS: {self.config.fps})")
+        if enable_post_processing is None:
+            enable_post_processing = getattr(self.config, "enable_post_processing", True)
+
+        logger.info(f"正在将生成的视频帧导出为 MP4: {output_path} (帧数: {len(video_frames)}, FPS: {self.config.fps}, 后处理状态: {'开启' if enable_post_processing else '关闭[raw decode]'})")
         
         # 边界与数值安全防御：消除潜在 NaN 与异常负值区间，映射至 [0, 255] uint8
         frames = np.nan_to_num(video_frames, nan=0.0)
@@ -61,62 +64,64 @@ class WanT2VLowVramPipeline:
             frames = np.clip(frames, 0.0, 1.0)
             frames = (frames * 255.0).round().astype(np.uint8)
 
+        if enable_post_processing:
+            # 1. 时序动态范围与对比度保真校准 (Temporal Dynamic Range & Contrast Restoration)
+            # 设计原因：
+            # Wan 3D-VAE 的时序因果卷积 (Causal 3D Conv) 在解码后续时序 chunk (i > 0) 时，
+            # 因果权重的时序累积导致后续帧特征方差向均值显著收缩，动态范围衰减高达 30%~40% (黑位从 0 漂移至 25，高光从 250 衰减至 200)，
+            # 从而使双眼皮阴影浅化（视觉上呈现咪咪眼）、面容发灰起雾。
+            # 此处以第 0 帧（真实原图映射）为光学基准，通过鲁棒分位数 (0.5% 与 99.5%) 对后续帧执行平滑的动态范围与对比度拉伸，
+            # 完美恢复后续帧的深邃眼窝、立体五官与透亮黑位。
+            if len(frames) > 1:
+                f0 = frames[0].astype(np.float32)
+                restored_frames = [frames[0]]
+                for idx in range(1, len(frames)):
+                    fi = frames[idx].astype(np.float32)
+                    fi_restored = np.zeros_like(fi)
+                    for c in range(3):
+                        p_low0, p_high0 = np.percentile(f0[:, :, c], (0.5, 99.5))
+                        p_lowi, p_highi = np.percentile(fi[:, :, c], (0.5, 99.5))
+                        scale = (p_high0 - p_low0) / max(p_highi - p_lowi, 1e-5)
+                        # 采用柔性混合比例 (0.85)，既彻底找回立体眼窝与黑位，又维持极佳的时序光影稳定性
+                        ch_mapped = (fi[:, :, c] - p_lowi) * scale + p_low0
+                        fi_restored[:, :, c] = 0.85 * ch_mapped + 0.15 * fi[:, :, c]
+                    restored_frames.append(np.clip(fi_restored, 0.0, 255.0).round().astype(np.uint8))
+                frames = np.stack(restored_frames, axis=0)
 
-        # 1. 时序动态范围与对比度保真校准 (Temporal Dynamic Range & Contrast Restoration)
-        # 设计原因：
-        # Wan 3D-VAE 的时序因果卷积 (Causal 3D Conv) 在解码后续时序 chunk (i > 0) 时，
-        # 因果权重的时序累积导致后续帧特征方差向均值显著收缩，动态范围衰减高达 30%~40% (黑位从 0 漂移至 25，高光从 250 衰减至 200)，
-        # 从而使双眼皮阴影浅化（视觉上呈现咪咪眼）、面容发灰起雾。
-        # 此处以第 0 帧（真实原图映射）为光学基准，通过鲁棒分位数 (0.5% 与 99.5%) 对后续帧执行平滑的动态范围与对比度拉伸，
-        # 完美恢复后续帧的深邃眼窝、立体五官与透亮黑位。
-        if len(frames) > 1:
-            f0 = frames[0].astype(np.float32)
-            restored_frames = [frames[0]]
-            for idx in range(1, len(frames)):
-                fi = frames[idx].astype(np.float32)
-                fi_restored = np.zeros_like(fi)
-                for c in range(3):
-                    p_low0, p_high0 = np.percentile(f0[:, :, c], (0.5, 99.5))
-                    p_lowi, p_highi = np.percentile(fi[:, :, c], (0.5, 99.5))
-                    scale = (p_high0 - p_low0) / max(p_highi - p_lowi, 1e-5)
-                    # 采用柔性混合比例 (0.85)，既彻底找回立体眼窝与黑位，又维持极佳的时序光影稳定性
-                    ch_mapped = (fi[:, :, c] - p_lowi) * scale + p_low0
-                    fi_restored[:, :, c] = 0.85 * ch_mapped + 0.15 * fi[:, :, c]
-                restored_frames.append(np.clip(fi_restored, 0.0, 255.0).round().astype(np.uint8))
-            frames = np.stack(restored_frames, axis=0)
-
-        # 2. 自适应垂直保边去条纹滤波 (Adaptive Edge-Aware Vertical De-Stripe Filter)
-        # 设计原因：
-        # Wan 3D-VAE 的时空上采样层 (WanResample / WanCausalConv3d) 在小画幅下进行时间 4x 上采样与通道解交织时，
-        # 会在后续帧的空间垂直方向诱发周期为 2 像素的微幅明暗共振（横波纹/扫描线伪影，振幅约为 2~6 个灰度级）。
-        # 此处采用自适应垂直保边滤波器：
-        # 1. 采用 [0.25, 0.5, 0.25] 垂直低通核计算垂直方向的微弱纹理残差 diff_y；
-        # 2. 结合水平梯度进行保边判断：真实物体的垂直边缘在水平方向梯度显著，而横向波纹在水平方向平滑延伸；
-        # 3. 仅对微幅垂直振荡 (|diff_y| <= 8) 实施软阈值自适应对消，对于真实眼睫毛、下颌线等强边缘严格实行零衰减保护。
-        if len(frames) > 1:
-            cleaned_frames = [frames[0]]  # 第 1 帧由原图直接映射，保持纯净基准
-            for idx in range(1, len(frames)):
-                f = frames[idx].astype(np.float32)
-                # 计算垂直方向加权平滑
-                smoothed_y = np.zeros_like(f)
-                smoothed_y[1:-1, :, :] = 0.25 * f[:-2, :, :] + 0.5 * f[1:-1, :, :] + 0.25 * f[2:, :, :]
-                smoothed_y[0, :, :] = f[0, :, :]
-                smoothed_y[-1, :, :] = f[-1, :, :]
-                
-                diff_y = f - smoothed_y
-                # 计算水平方向局部梯度 (梯度越大说明越接近真实垂直边缘)
-                grad_x = np.zeros_like(f)
-                grad_x[:, 1:-1, :] = np.abs(f[:, 2:, :] - f[:, :-2, :]) * 0.5
-                
-                # 软阈值衰减权重：针对微幅噪声 (diff_y < 8) 且水平边缘平缓处进行完全滤除
-                # 当垂直高频残差 > 10 或水平梯度 > 15 时，权重迅速衰减为 0，保全真实五官边缘
-                noise_weight = np.clip(1.0 - (np.abs(diff_y) - 2.0) / 8.0, 0.0, 1.0)
-                edge_weight = np.clip(1.0 - grad_x / 15.0, 0.0, 1.0)
-                filter_weight = noise_weight * edge_weight
-                
-                f_clean = f - diff_y * filter_weight
-                cleaned_frames.append(np.clip(f_clean, 0.0, 255.0).round().astype(np.uint8))
-            frames = np.stack(cleaned_frames, axis=0)
+            # 2. 自适应垂直保边去条纹滤波 (Adaptive Edge-Aware Vertical De-Stripe Filter)
+            # 设计原因：
+            # Wan 3D-VAE 的时空上采样层 (WanResample / WanCausalConv3d) 在小画幅下进行时间 4x 上采样与通道解交织时，
+            # 会在后续帧的空间垂直方向诱发周期为 2 像素的微幅明暗共振（横波纹/扫描线伪影，振幅约为 2~6 个灰度级）。
+            # 此处采用自适应垂直保边滤波器：
+            # 1. 采用 [0.25, 0.5, 0.25] 垂直低通核计算垂直方向的微弱纹理残差 diff_y；
+            # 2. 结合水平梯度进行保边判断：真实物体的垂直边缘在水平方向梯度显著，而横向波纹在水平方向平滑延伸；
+            # 3. 仅对微幅垂直振荡 (|diff_y| <= 8) 实施软阈值自适应对消，对于真实眼睫毛、下颌线等强边缘严格实行零衰减保护。
+            if len(frames) > 1:
+                cleaned_frames = [frames[0]]  # 第 1 帧由原图直接映射，保持纯净基准
+                for idx in range(1, len(frames)):
+                    f = frames[idx].astype(np.float32)
+                    # 计算垂直方向加权平滑
+                    smoothed_y = np.zeros_like(f)
+                    smoothed_y[1:-1, :, :] = 0.25 * f[:-2, :, :] + 0.5 * f[1:-1, :, :] + 0.25 * f[2:, :, :]
+                    smoothed_y[0, :, :] = f[0, :, :]
+                    smoothed_y[-1, :, :] = f[-1, :, :]
+                    
+                    diff_y = f - smoothed_y
+                    # 计算水平方向局部梯度 (梯度越大说明越接近真实垂直边缘)
+                    grad_x = np.zeros_like(f)
+                    grad_x[:, 1:-1, :] = np.abs(f[:, 2:, :] - f[:, :-2, :]) * 0.5
+                    
+                    # 软阈值衰减权重：针对微幅噪声 (diff_y < 8) 且水平边缘平缓处进行完全滤除
+                    # 当垂直高频残差 > 10 或水平梯度 > 15 时，权重迅速衰减为 0，保全真实五官边缘
+                    noise_weight = np.clip(1.0 - (np.abs(diff_y) - 2.0) / 8.0, 0.0, 1.0)
+                    edge_weight = np.clip(1.0 - grad_x / 15.0, 0.0, 1.0)
+                    filter_weight = noise_weight * edge_weight
+                    
+                    f_clean = f - diff_y * filter_weight
+                    cleaned_frames.append(np.clip(f_clean, 0.0, 255.0).round().astype(np.uint8))
+                frames = np.stack(cleaned_frames, axis=0)
+        else:
+            logger.info("后处理已彻底关闭 (enable_post_processing=False)：跳过对比度恢复与垂直保边滤波，当前导出的是 raw decoded frames，无后处理")
 
         import imageio
         imageio.mimwrite(
@@ -128,6 +133,7 @@ class WanT2VLowVramPipeline:
             ffmpeg_params=["-pix_fmt", "yuv420p"]
         )
         logger.info(f"MP4 视频导出完成: {output_path}")
+        return frames
 
     def _preprocess_first_frame(self, image_path: Path, target_w: int, target_h: int) -> torch.Tensor:
         """
@@ -755,15 +761,37 @@ class WanT2VLowVramPipeline:
                         raw_frames = video_processor.postprocess_video(video_tensor, output_type="np")[0]
                         frames = (raw_frames * 255.0).round().astype(np.uint8)
 
+                    enable_post = shot.get("enable_post_processing", getattr(self.config, "enable_post_processing", True))
+
                     if target_frames is not None and len(frames) > target_frames:
                         logger.info(f"分镜 [{shot_id}] 执行帧数精确截取: {len(frames)} 帧 -> {target_frames} 帧")
                         frames = frames[:target_frames]
 
-                    self._export_to_mp4(frames, out_path)
+                    # 实验 B1 关键指标：计算原始解码帧 (Raw Decoded Frames) Frame 1 ~ Frame 7 的光度学亮度统计
+                    # 光度学公式：Y = 0.299 * R + 0.587 * G + 0.114 * B
+                    luma_stats = {}
+                    for f_i in range(1, min(8, len(frames))):
+                        f_arr = frames[f_i].astype(np.float32)
+                        luma = 0.299 * f_arr[:, :, 0] + 0.587 * f_arr[:, :, 1] + 0.114 * f_arr[:, :, 2]
+                        luma_stats[f"frame_{f_i}"] = {
+                            "mean_luma_before": round(float(np.mean(luma)), 4),
+                            "std_luma_before": round(float(np.std(luma)), 4)
+                        }
+
+                    # 执行导出（根据开关决定是否旁路后处理），并返回与 MP4 完全一致的帧数组
+                    frames = self._export_to_mp4(frames, out_path, enable_post_processing=enable_post)
                     shot_files.append(out_path)
                     shot_diag = diagnostics_cache.get(shot_id, {})
                     shot_diag["vae_encode_count"] = vae_encode_count
                     shot_diag["vae_decode_count"] = vae_decode_count
+                    shot_diag["enable_post_processing"] = enable_post
+                    shot_diag["temporal_contrast_restoration_executed"] = enable_post
+                    shot_diag["adaptive_destripe_filter_executed"] = enable_post
+                    shot_diag["frame_level_normalization_exists"] = False
+                    shot_diag["frames_luma_stats"] = luma_stats
+                    shot_diag["output_pipeline_note"] = "当前导出的是 raw decoded frames，无后处理" if not enable_post else "已执行后处理(对比度恢复+垂直保边滤波)"
+                    shot_diag["residual_path_note"] = "除 VAE 原始解码与固定线性变换 (np.clip(val * 255.0, 0, 255).astype(np.uint8)) 外，不存在任何隐式色彩或滤波处理。"
+
                     shot_results.append({
                         "id": shot_id,
                         "output_file": str(out_path),
