@@ -529,6 +529,9 @@ class WanT2VLowVramPipeline:
 
             # ---------------- 阶段 3: 潜空间连续去噪生成分镜头 Latent ----------------
             latents_cache = {}
+            diagnostics_cache = {}
+            vae_encode_count = 0
+            vae_decode_count = 0
             for idx, shot in enumerate(pending_shots, start=1):
                 shot_id = shot["id"]
                 num_raw_frames = shot.get("num_frames", self.config.num_frames)
@@ -544,11 +547,15 @@ class WanT2VLowVramPipeline:
                 z_ref0 = None
                 noisy_latents = None
                 strength = shot.get("strength", getattr(self.config, "strength", 0.65))
+                enable_anchoring = shot.get("enable_temporal_anchoring", getattr(self.config, "enable_temporal_anchoring", True))
+                if not enable_anchoring:
+                    logger.info(f"分镜 [{shot_id}] 【实验 A1】已关闭 Progressive Temporal Identity Anchoring (Frame 1~8: anchor_weight = 0)")
 
                 if is_any_i2v and shot_first_frame:
                     ref_p = Path(shot_first_frame)
                     if ref_p.exists():
                         logger.info(f"分镜 [{shot_id}] 启用首帧时序先验注入 (I2V)，参考原图: {ref_p.name} (去噪强度: {strength})")
+                        vae_encode_count += 1
                         z_ref0 = self._encode_first_frame_latent(
                             ref_p, self.config.width, self.config.height, target_device=self.device
                         ).to(torch.float16)
@@ -580,15 +587,11 @@ class WanT2VLowVramPipeline:
 
                         def first_frame_callback(pipe_obj, step_idx, timestep, callback_kwargs):
                             """
-                            全时序潜空间渐进软锚定回调函数 (Progressive Temporal Identity Anchoring)
-                            设计原因：
-                            此前仅硬锁定 Slice 0 (第0帧)，而 Slice 1 (第2~4帧) 与 Slice 2 (第5~8帧) 无任何首帧约束，
-                            导致时序误差随注意力逐步发散放缩，第3帧之后一帧比一帧差、横波纹加剧且最后一帧面部失控出现诡异笑。
-                            此处重构为全时序渐进软锚定：
-                            1. Slice 0: 100% 锁定首帧加噪基准 target_f0，确保第0帧与第1帧作为完美物理母本；
-                            2. Slice 1: 施加 85% 首帧潜空间强阻尼 (保留85%原图骨相，仅放行15%微表情流动)，保证眨眼自然；
-                            3. Slice 2: 施加 80% 首帧潜空间强阻尼 (保留80%原图骨相，仅放行20%从容平视流动)，绝不允许嘴角失控变形；
-                            从数学根源上切断误差滚雪球累积，确保整整 8 帧面貌端庄稳重、波纹彻底不发散。
+                            首帧先验注入与全时序潜空间渐进软锚定回调函数
+                            1. Slice 0 (第0帧): 100% 锁定首帧加噪基准 target_f0，确保第0帧作为物理母本；
+                            2. Slice 1 (第1~4帧) & Slice 2 (第5~8帧):
+                               - 默认 (enable_anchoring=True): 施加 85% 与 80% 骨相阻尼约束；
+                               - 实验 A1 (enable_anchoring=False): 完全跳过锚定融合，anchor_weight = 0，自由去噪。
                             """
                             lat = callback_kwargs["latents"]
                             actual_step = t_start + step_idx
@@ -602,17 +605,17 @@ class WanT2VLowVramPipeline:
                             target_f0 = (1.0 - sigma_next) * z_ref0 + sigma_next * eps0
                             lat[:, :, 0:1, :, :] = target_f0
 
-                            # 2. Slice 1 (第2~4帧) 85% 骨相强约束软融合
-                            if lat.shape[2] > 1:
-                                eps1 = noise[:, :, 1:2, :, :]
-                                target_f1 = (1.0 - sigma_next) * z_ref0 + sigma_next * eps1
-                                lat[:, :, 1:2, :, :] = 0.85 * target_f1 + 0.15 * lat[:, :, 1:2, :, :]
+                            # 2. Slice 1 与 Slice 2 渐进软锚定 (实验 A1 若关闭则 anchor_weight = 0，跳过融合)
+                            if enable_anchoring:
+                                if lat.shape[2] > 1:
+                                    eps1 = noise[:, :, 1:2, :, :]
+                                    target_f1 = (1.0 - sigma_next) * z_ref0 + sigma_next * eps1
+                                    lat[:, :, 1:2, :, :] = 0.85 * target_f1 + 0.15 * lat[:, :, 1:2, :, :]
 
-                            # 3. Slice 2 (第5~8帧) 80% 骨相强约束软融合 (彻底杜绝诡异假笑与时序失控)
-                            if lat.shape[2] > 2:
-                                eps2 = noise[:, :, 2:3, :, :]
-                                target_f2 = (1.0 - sigma_next) * z_ref0 + sigma_next * eps2
-                                lat[:, :, 2:3, :, :] = 0.80 * target_f2 + 0.20 * lat[:, :, 2:3, :, :]
+                                if lat.shape[2] > 2:
+                                    eps2 = noise[:, :, 2:3, :, :]
+                                    target_f2 = (1.0 - sigma_next) * z_ref0 + sigma_next * eps2
+                                    lat[:, :, 2:3, :, :] = 0.80 * target_f2 + 0.20 * lat[:, :, 2:3, :, :]
 
                             callback_kwargs["latents"] = lat
                             return callback_kwargs
@@ -658,6 +661,42 @@ class WanT2VLowVramPipeline:
                         res_lat[:, :, 0:1, :, :] = z_ref0
                     latents_cache[shot_id] = res_lat.cpu()  # 移至 CPU 内存暂存，零 GPU 显存驻留
 
+                    # 采集运行时诊断数据
+                    executed_ts = pipe.scheduler.timesteps.tolist()
+                    if is_any_i2v and t_start < len(pipe.scheduler.timesteps):
+                        executed_ts = pipe.scheduler.timesteps[t_start:].tolist()
+                    scheduler_sigmas = pipe.scheduler.sigmas.tolist() if hasattr(pipe.scheduler, "sigmas") and pipe.scheduler.sigmas is not None else []
+
+                    diagnostics_cache[shot_id] = {
+                        "scheduler_class": pipe.scheduler.__class__.__name__,
+                        "scheduler_config": {
+                            "shift": getattr(pipe.scheduler.config, "shift", None),
+                            "prediction_type": getattr(pipe.scheduler.config, "prediction_type", None),
+                            "num_train_timesteps": getattr(pipe.scheduler.config, "num_train_timesteps", None),
+                        },
+                        "num_inference_steps_config": self.config.num_inference_steps,
+                        "actual_timesteps_len": len(executed_ts),
+                        "actual_timesteps_head5": [round(float(x), 4) for x in executed_ts[:5]],
+                        "actual_timesteps_tail5": [round(float(x), 4) for x in executed_ts[-5:]],
+                        "sigmas_head5": [round(float(x), 4) for x in scheduler_sigmas[:5]] if scheduler_sigmas else None,
+                        "sigmas_tail5": [round(float(x), 4) for x in scheduler_sigmas[-5:]] if scheduler_sigmas else None,
+                        "guidance_scale": float(self.config.guidance_scale),
+                        "strength": float(strength),
+                        "temporal_slices": {
+                            "Slice 0": "Frame 0 (第0帧)",
+                            "Slice 1": "Frame 1 ~ Frame 4 (第1~4帧)",
+                            "Slice 2": "Frame 5 ~ Frame 8 (第5~8帧)"
+                        },
+                        "anchor_weights": {
+                            "Slice 0 (Frame 0)": 1.0,
+                            "Slice 1 (Frame 1~4)": 0.85 if enable_anchoring else 0.0,
+                            "Slice 2 (Frame 5~8)": 0.80 if enable_anchoring else 0.0
+                        },
+                        "enable_temporal_anchoring": enable_anchoring,
+                        "reencode_feedback_exists": False,
+                        "clean_noisy_direct_linear_mix_exists": False
+                    }
+
                 self.sentinel.force_clean_memory()
 
             # 卸载 Transformer 并完全释放 GPU 显存
@@ -700,6 +739,7 @@ class WanT2VLowVramPipeline:
                         )
                         shot_latent_denorm = shot_latent / latents_std + latents_mean
 
+                        vae_decode_count += 1
                         video_tensor = vae.decode(shot_latent_denorm, return_dict=False)[0]
 
                         from diffusers.video_processor import VideoProcessor
@@ -713,10 +753,15 @@ class WanT2VLowVramPipeline:
 
                     self._export_to_mp4(frames, out_path)
                     shot_files.append(out_path)
+                    shot_diag = diagnostics_cache.get(shot_id, {})
+                    shot_diag["vae_encode_count"] = vae_encode_count
+                    shot_diag["vae_decode_count"] = vae_decode_count
                     shot_results.append({
                         "id": shot_id,
                         "output_file": str(out_path),
-                        "frames": len(frames)
+                        "frames": len(frames),
+                        "frame_arrays": frames,
+                        "diagnostics": shot_diag
                     })
 
             # 释放 VAE
@@ -752,7 +797,8 @@ class WanT2VLowVramPipeline:
             "shot_results": shot_results,
             "final_video": str(final_video_path) if final_video_path else None,
             "total_elapsed_sec": round(total_elapsed, 2),
-            "gpu_peak_vram_mb": memory_info["gpu_max_allocated_mb"]
+            "gpu_peak_vram_mb": memory_info["gpu_max_allocated_mb"],
+            "diagnostics": shot_results[0].get("diagnostics") if shot_results else {}
         }
 
         logger.info(f"多分镜连续渲染全部完成！总耗时: {total_elapsed:.2f}s | 峰值显存: {memory_info['gpu_max_allocated_mb']}MB")

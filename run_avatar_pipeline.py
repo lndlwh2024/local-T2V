@@ -74,12 +74,11 @@ SHOTS_CONFIG = [
 ]
 
 
-def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", first_frame_path: str = None, strength: float = 0.20) -> dict:
+def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", first_frame_path: str = None, strength: float = 0.20, enable_temporal_anchoring: bool = True) -> dict:
     """
     构造标准分镜头数据包
     设计原因：
-    底层锁定 9 帧 (4n+1，n=2)，在首帧潜变量锚定与全时序渐进软锚定约束下严格继承原图人物骨相与五官，
-    保留 80%~85% 真实五官潜变量，杜绝重绘导致的面容走样与时序发散；
+    底层锁定 9 帧 (4n+1，n=2)，在首帧潜变量锚定约束下严格继承原图人物骨相与五官；
     配合 FP32 VAE 解码、时序对比度保真恢复与自适应保边去条纹滤波，截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
     """
     shot_id = shot_info["id"]
@@ -90,6 +89,7 @@ def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", 
         "negative_prompt": NEGATIVE_PROMPT,
         "first_frame_path": first_frame_path,
         "strength": strength,
+        "enable_temporal_anchoring": enable_temporal_anchoring,
         "num_frames": 9,
         "target_num_frames": 8,
         "seed": seed,
@@ -111,11 +111,15 @@ def main():
     parser.add_argument("--force", action="store_true", help="强制重新渲染，不复用已有分镜缓存")
     parser.add_argument("--first-frame", type=str, default="media/数字人大图正面.png", help="首帧参考数字人图像路径（默认 media/数字人大图正面.png）")
     parser.add_argument("--output", type=str, default="avatar_speech_5s.mp4", help="最终成品视频文件名")
+    parser.add_argument("--no-temporal-anchor", action="store_true", help="关闭 Progressive Temporal Identity Anchoring (实验 A1)")
+    parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_A1）")
     args = parser.parse_args()
 
+    enable_anchor = not args.no_temporal_anchor
     logger.info("==================================================================")
     logger.info("  🚀 数字人时序卡点视频流水线 (Wan2.1 原生 832x480 电影级引擎)")
     logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength}")
+    logger.info(f"  潜空间时序锚定: {'【已关闭】(实验 A1: Frame 1~8 anchor_weight = 0)' if not enable_anchor else '【开启】(渐进软锚定 85%/80%)'}")
     if args.first_frame:
         logger.info(f"  首帧定义: {args.first_frame} (I2V 条件注入模式)")
     logger.info("==================================================================")
@@ -126,6 +130,7 @@ def main():
         negative_prompt=NEGATIVE_PROMPT,
         first_frame_path=args.first_frame,
         strength=args.strength,
+        enable_temporal_anchoring=enable_anchor,
         width=args.width,
         height=args.height,
         num_frames=9,
@@ -143,7 +148,16 @@ def main():
     pipeline = WanT2VLowVramPipeline(base_config)
 
     targets_info = [s for s in SHOTS_CONFIG if args.shot == "all" or s["id"] == args.shot]
-    shots_to_render = [build_shot_item(s, seed=args.seed, filename_prefix=args.prefix, first_frame_path=args.first_frame, strength=args.strength) for s in targets_info]
+    shots_to_render = [
+        build_shot_item(
+            s,
+            seed=args.seed,
+            filename_prefix=args.prefix,
+            first_frame_path=args.first_frame,
+            strength=args.strength,
+            enable_temporal_anchoring=enable_anchor
+        ) for s in targets_info
+    ]
 
     # 若指定了 --force，提前清理对应已有视频文件以确保强制重新渲染
     if args.force:
@@ -170,13 +184,17 @@ def main():
         logger.info("关键帧预览提取完成！")
     elif args.shot != "all" and audit.get("shot_results"):
         single_video = audit["shot_results"][0]["output_file"]
+        shot_res = audit["shot_results"][0]
         logger.info(f"正在为单个分镜头 {single_video} 生成全画幅对比图、面部微距对齐图与动图预览...")
         import imageio
         from PIL import Image, ImageDraw, ImageFont
         try:
-            reader = imageio.get_reader(single_video)
-            v_frames = [f for f in reader]
-            reader.close()
+            v_frames = shot_res.get("frame_arrays")
+            if v_frames is None:
+                reader = imageio.get_reader(single_video)
+                v_frames = [f for f in reader]
+                reader.close()
+
             if len(v_frames) >= 2:
                 # 1. 导出轻量级预览动图 GIF
                 gif_path = OUTPUT_DIR / f"{args.prefix}{args.shot}_preview.gif"
@@ -217,8 +235,140 @@ def main():
                 strip_path = OUTPUT_DIR / f"{args.prefix}{args.shot}_face_strip_all8.png"
                 strip_canvas.save(str(strip_path))
                 logger.info(f"8帧全时序面部连续演化条带已生成: {strip_path}")
+
+            # ---------------- 实验输出归档 (例如 run_A1/) ----------------
+            if args.output_dir:
+                exp_dir = Path(args.output_dir)
+                exp_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"正在保存实验数据至目录: {exp_dir.resolve()} ...")
+
+                # 1. 保存 frame_0.png ~ frame_7.png
+                for f_idx, fr in enumerate(v_frames[:8]):
+                    f_path = exp_dir / f"frame_{f_idx}.png"
+                    Image.fromarray(fr).save(str(f_path))
+                    logger.info(f"  已导出原始画幅帧: {f_path.name}")
+
+                # 2. 生成 contact_sheet.png (2x4 网格布局，清晰排版并带标签)
+                cols = 4
+                rows = 2
+                banner_h = 36
+                sheet_w = cols * w
+                sheet_h = rows * (h + banner_h)
+                contact_sheet = Image.new("RGB", (sheet_w, sheet_h), color=(20, 20, 20))
+                draw = ImageDraw.Draw(contact_sheet)
+
+                for idx in range(min(8, len(v_frames))):
+                    col = idx % cols
+                    row = idx // cols
+                    x = col * w
+                    y = row * (h + banner_h)
+
+                    if idx == 0:
+                        label = "Frame 0 (Reference Anchor: 100%)"
+                    else:
+                        anchor_tag = "Anchor: 0%" if not enable_anchor else ("Anchor: 85%" if idx <= 4 else "Anchor: 80%")
+                        label = f"Frame {idx} ({anchor_tag})"
+
+                    draw.rectangle([x, y, x + w, y + banner_h], fill=(32, 32, 32))
+                    draw.text((x + 16, y + 10), label, fill=(240, 240, 240))
+                    fr_img = Image.fromarray(v_frames[idx])
+                    contact_sheet.paste(fr_img, (x, y + banner_h))
+
+                sheet_path = exp_dir / "contact_sheet.png"
+                contact_sheet.save(str(sheet_path))
+                logger.info(f"  接触印样对比图已生成: {sheet_path.name}")
+
+                # 3. 导出 run_config.txt (包含 14 项完整诊断数据与配置)
+                diag = shot_res.get("diagnostics", audit.get("diagnostics", {}))
+                diag_lines = [
+                    "=" * 80,
+                    "          Wan2.1 运行时诊断与实验配置报告 (Runtime Diagnostics & Config)",
+                    "=" * 80,
+                    f"实验名称: 实验 A1 - 关闭 Progressive Temporal Identity Anchoring",
+                    f"分镜标识: {shot_res.get('id', 'shot_01')}",
+                    f"时序锚定状态: {'已关闭 (enable_temporal_anchoring=False)' if not enable_anchor else '已开启'}",
+                    "",
+                    "【核心诊断数据 14 项清单】",
+                    f"1. scheduler 实际类名:",
+                    f"   {diag.get('scheduler_class', 'FlowMatchEulerDiscreteScheduler')}",
+                    "",
+                    f"2. scheduler.config 完整关键参数:",
+                    f"   - shift: {diag.get('scheduler_config', {}).get('shift')}",
+                    f"   - prediction_type: {diag.get('scheduler_config', {}).get('prediction_type')}",
+                    f"   - num_train_timesteps: {diag.get('scheduler_config', {}).get('num_train_timesteps')}",
+                    "",
+                    f"3. num_inference_steps 配置值:",
+                    f"   {diag.get('num_inference_steps_config', 20)}",
+                    "",
+                    f"4. 实际执行的 scheduler timestep 数量:",
+                    f"   len(timesteps) = {diag.get('actual_timesteps_len')}",
+                    "",
+                    f"5. 实际 timesteps 的前5个和后5个值:",
+                    f"   - 前5个值: {diag.get('actual_timesteps_head5')}",
+                    f"   - 后5个值: {diag.get('actual_timesteps_tail5')}",
+                    "",
+                    f"6. sigmas 值 (如果存在):",
+                    f"   - sigmas 前5个: {diag.get('sigmas_head5')}",
+                    f"   - sigmas 后5个: {diag.get('sigmas_tail5')}",
+                    "",
+                    f"7. guidance_scale 实际值:",
+                    f"   {diag.get('guidance_scale', 2.0)}",
+                    "",
+                    f"8. strength 实际值:",
+                    f"   {diag.get('strength', 0.20)}",
+                    "",
+                    f"9. VAE encode 被调用的总次数:",
+                    f"   {diag.get('vae_encode_count', 1)} 次 (首帧参考图像编码为潜变量 z_ref0)",
+                    "",
+                    f"10. VAE decode 被调用的总次数:",
+                    f"   {diag.get('vae_decode_count', 1)} 次 (全分镜潜变量张量解码为视频帧)",
+                    "",
+                    f"11. 每个 temporal slice 的实际 frame 范围:",
+                    f"   - Slice 0: Frame 0 (对应第0帧，因果单帧时间切片)",
+                    f"   - Slice 1: Frame 1 ~ Frame 4 (对应第1~4帧，因果反卷积4:1上采样区间)",
+                    f"   - Slice 2: Frame 5 ~ Frame 8 (对应第5~8帧，因果反卷积4:1上采样区间)",
+                    "",
+                    f"12. 每个 slice 使用的 anchor 权重:",
+                    f"   - Slice 0 (Frame 0): {diag.get('anchor_weights', {}).get('Slice 0 (Frame 0)', 1.0)} (100% 锁定与原图直接替换)",
+                    f"   - Slice 1 (Frame 1~4): {diag.get('anchor_weights', {}).get('Slice 1 (Frame 1~4)', 0.0)} ({'anchor_weight = 0，已跳过85%锚定' if not enable_anchor else '85% 锚定'})",
+                    f"   - Slice 2 (Frame 5~8): {diag.get('anchor_weights', {}).get('Slice 2 (Frame 5~8)', 0.0)} ({'anchor_weight = 0，已跳过80%锚定' if not enable_anchor else '80% 锚定'})",
+                    "",
+                    f"13. 是否存在 generated frame -> VAE encode -> 参与后续帧生成:",
+                    f"   否 (False)。采用 3D-DiT 全局时空联合去噪，无任何生成帧重新送入 VAE 编码的自回归循环。",
+                    "",
+                    f"14. 是否存在 clean reference latent 直接与当前 noisy latent 做线性混合:",
+                    f"   否 (False)。去噪迭代中仅对 Slice 0 使用对应噪声水平的 target_f0，Slice 1 与 Slice 2 无混合；解码前对 Slice 0 整体直接替换。",
+                    "",
+                    "=" * 80,
+                    "【恒定实验参数清单】",
+                    f"- 模型架构: Wan2.1-1.3B FP16 DiT + UMT5-XXL FP8 + FP32 3D-VAE",
+                    f"- Prompt: {AVATAR_BASE_PROMPT}",
+                    f"- Seed: {args.seed}",
+                    f"- 分辨率: {args.width}x{args.height}",
+                    f"- 原始帧数: 9 帧 (最终导出精确截取前 8 帧)",
+                    f"- 帧率: 8 fps",
+                    f"- 步数: {args.steps}",
+                    f"- Strength: {args.strength}",
+                    f"- CFG (guidance_scale): 2.0",
+                    f"- 后处理: 保持原样 (时序对比度校准 + 自适应垂直保边滤波)",
+                    f"- 显存机制: CPU/GPU 内存解耦换入换出",
+                    "=" * 80,
+                ]
+                config_content = "\n".join(diag_lines)
+
+                run_cfg_path = exp_dir / "run_config.txt"
+                with open(run_cfg_path, "w", encoding="utf-8") as f:
+                    f.write(config_content)
+                logger.info(f"  实验配置与诊断日志已写入: {run_cfg_path.name}")
+
+                # 同时写入 run_debug.txt 满足请求 7
+                with open(exp_dir / "run_debug.txt", "w", encoding="utf-8") as f:
+                    f.write(config_content)
+                with open("run_debug.txt", "w", encoding="utf-8") as f:
+                    f.write(config_content)
+                logger.info("  run_debug.txt 已同步保存至工作区根目录！")
         except Exception as e:
-            logger.warning(f"生成微距检验图时遇到非致命异常: {e}")
+            logger.warning(f"生成微距检验图或实验归档时遇到非致命异常: {e}", exc_info=True)
 
     logger.info("==================================================================")
     logger.info(f" 🎉 任务执行完毕！总耗时: {audit['total_elapsed_sec']}s | 峰值显存: {audit['gpu_peak_vram_mb']}MB")

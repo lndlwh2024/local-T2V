@@ -1,0 +1,72 @@
+================================================================================
+          Wan2.1 运行时诊断与实验配置报告 (Runtime Diagnostics & Config)
+================================================================================
+实验名称: 实验 A1 - 关闭 Progressive Temporal Identity Anchoring
+分镜标识: shot_01
+时序锚定状态: 已关闭 (enable_temporal_anchoring=False)
+
+【核心诊断数据 14 项清单】
+1. scheduler 实际类名:
+   FlowMatchEulerDiscreteScheduler
+
+2. scheduler.config 完整关键参数:
+   - shift: 1.0
+   - prediction_type: flow_prediction
+   - num_train_timesteps: 1000
+
+3. num_inference_steps 配置值:
+   20
+
+4. 实际执行的 scheduler timestep 数量:
+   len(timesteps) = 4
+
+5. 实际 timesteps 的前5个和后5个值:
+   - 前5个值: [158.7368, 106.1579, 53.5789, 1.0]
+   - 后5个值: [158.7368, 106.1579, 53.5789, 1.0]
+
+6. sigmas 值 (如果存在):
+   - sigmas 前5个: [1.0, 0.9474, 0.8948, 0.8423, 0.7897]
+   - sigmas 后5个: [0.1587, 0.1062, 0.0536, 0.001, 0.0]
+
+7. guidance_scale 实际值:
+   2.0
+
+8. strength 实际值:
+   0.2
+
+9. VAE encode 被调用的总次数:
+   1 次 (首帧参考图像编码为潜变量 z_ref0)
+
+10. VAE decode 被调用的总次数:
+   1 次 (全分镜潜变量张量解码为视频帧)
+
+11. 每个 temporal slice 的实际 frame 范围:
+   - Slice 0: Frame 0 (对应第0帧，因果单帧时间切片)
+   - Slice 1: Frame 1 ~ Frame 4 (对应第1~4帧，因果反卷积4:1上采样区间)
+   - Slice 2: Frame 5 ~ Frame 8 (对应第5~8帧，因果反卷积4:1上采样区间)
+
+12. 每个 slice 使用的 anchor 权重:
+   - Slice 0 (Frame 0): 1.0 (100% 锁定与原图直接替换)
+   - Slice 1 (Frame 1~4): 0.0 (anchor_weight = 0，已跳过85%锚定)
+   - Slice 2 (Frame 5~8): 0.0 (anchor_weight = 0，已跳过80%锚定)
+
+13. 是否存在 generated frame -> VAE encode -> 参与后续帧生成:
+   否 (False)。采用 3D-DiT 全局时空联合去噪，无任何生成帧重新送入 VAE 编码的自回归循环。
+
+14. 是否存在 clean reference latent 直接与当前 noisy latent 做线性混合:
+   否 (False)。去噪迭代中仅对 Slice 0 使用对应噪声水平的 target_f0，Slice 1 与 Slice 2 无混合；解码前对 Slice 0 整体直接替换。
+
+================================================================================
+【恒定实验参数清单】
+- 模型架构: Wan2.1-1.3B FP16 DiT + UMT5-XXL FP8 + FP32 3D-VAE
+- Prompt: A photorealistic mature Asian man with a natural very short shaved buzz-cut hairstyle, neat natural hairline, groomed salt-and-pepper goatee, wearing a clean plain white crewneck t-shirt with a tiny red chest logo, standing in a modern high-tech broadcast studio with ambient soft studio lighting, 8k resolution, highly detailed realistic skin texture, cinematic quality.
+- Seed: 42
+- 分辨率: 832x480
+- 原始帧数: 9 帧 (最终导出精确截取前 8 帧)
+- 帧率: 8 fps
+- 步数: 20
+- Strength: 0.2
+- CFG (guidance_scale): 2.0
+- 后处理: 保持原样 (时序对比度校准 + 自适应垂直保边滤波)
+- 显存机制: CPU/GPU 内存解耦换入换出
+================================================================================

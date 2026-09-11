@@ -52,6 +52,10 @@ class VideoGenerationConfig:
     # 控制对首帧骨相与环境先验的保留程度；0.20 可严格锁定 80% 原图五官骨相与双眼皮儒雅神采，
     # 彻底杜绝文本先验覆盖导致的变脸走样，同时提供恰到好处的眨眼与呼吸微动作
     strength: float = 0.20
+    # 全时序潜空间渐进软锚定开关 (Progressive Temporal Identity Anchoring)
+    # 控制是否对 Slice 1 (第1~4帧) 与 Slice 2 (第5~8帧) 实施骨相强阻尼约束；
+    # 实验 A1 中将其设为 False (anchor_weight = 0)，单独检验软锚定对波纹和重影的影响
+    enable_temporal_anchoring: bool = True
 
     def validate(self) -> None:
         """
