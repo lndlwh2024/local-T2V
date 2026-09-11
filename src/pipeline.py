@@ -622,6 +622,7 @@ class WanT2VLowVramPipeline:
 
                         first_frame_cb = first_frame_callback
 
+                t_denoise_start = time.time()
                 with self.sentinel.guard(f"去噪_{shot_id}"):
                     effective_steps = int(self.config.num_inference_steps * strength) if is_any_i2v else self.config.num_inference_steps
                     logger.info(f"分镜 [{shot_id}] 去噪推理执行，总步数计划: {self.config.num_inference_steps} 步 (实际迭代: {effective_steps} 步)...")
@@ -661,6 +662,8 @@ class WanT2VLowVramPipeline:
                         res_lat[:, :, 0:1, :, :] = z_ref0
                     latents_cache[shot_id] = res_lat.cpu()  # 移至 CPU 内存暂存，零 GPU 显存驻留
 
+                    denoise_elapsed = time.time() - t_denoise_start
+
                     # 采集运行时诊断数据
                     executed_ts = pipe.scheduler.timesteps.tolist()
                     if is_any_i2v and t_start < len(pipe.scheduler.timesteps):
@@ -674,10 +677,15 @@ class WanT2VLowVramPipeline:
                             "prediction_type": getattr(pipe.scheduler.config, "prediction_type", None),
                             "num_train_timesteps": getattr(pipe.scheduler.config, "num_train_timesteps", None),
                         },
+                        "configured_num_inference_steps": self.config.num_inference_steps,
                         "num_inference_steps_config": self.config.num_inference_steps,
+                        "actual_iteration_count": len(executed_ts),
                         "actual_timesteps_len": len(executed_ts),
+                        "actual_timesteps_head3": [round(float(x), 4) for x in executed_ts[:3]],
+                        "actual_timesteps_tail3": [round(float(x), 4) for x in executed_ts[-3:]],
                         "actual_timesteps_head5": [round(float(x), 4) for x in executed_ts[:5]],
                         "actual_timesteps_tail5": [round(float(x), 4) for x in executed_ts[-5:]],
+                        "transformer_denoise_elapsed_sec": round(denoise_elapsed, 2),
                         "sigmas_head5": [round(float(x), 4) for x in scheduler_sigmas[:5]] if scheduler_sigmas else None,
                         "sigmas_tail5": [round(float(x), 4) for x in scheduler_sigmas[-5:]] if scheduler_sigmas else None,
                         "guidance_scale": float(self.config.guidance_scale),

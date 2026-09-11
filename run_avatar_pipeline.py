@@ -278,15 +278,30 @@ def main():
                 contact_sheet.save(str(sheet_path))
                 logger.info(f"  接触印样对比图已生成: {sheet_path.name}")
 
-                # 3. 导出 run_config.txt (包含 14 项完整诊断数据与配置)
+                # 3. 保存 8 帧面部微距连续演化条带至实验目录
+                strip_out_path = exp_dir / "face_strip_all8.png"
+                strip_canvas.save(str(strip_out_path))
+                logger.info(f"  8帧面部连续演化条带已生成: {strip_out_path.name}")
+
+                # 4. 导出 run_config.txt (包含 14 项完整诊断数据与配置)
                 diag = shot_res.get("diagnostics", audit.get("diagnostics", {}))
                 diag_lines = [
                     "=" * 80,
                     "          Wan2.1 运行时诊断与实验配置报告 (Runtime Diagnostics & Config)",
                     "=" * 80,
-                    f"实验名称: 实验 A1 - 关闭 Progressive Temporal Identity Anchoring",
+                    f"实验目录: {exp_dir.name}",
                     f"分镜标识: {shot_res.get('id', 'shot_01')}",
                     f"时序锚定状态: {'已关闭 (enable_temporal_anchoring=False)' if not enable_anchor else '已开启'}",
+                    "",
+                    "【本轮关键执行与去噪指标】",
+                    f"configured_num_inference_steps = {args.steps}",
+                    f"strength = {args.strength:.2f}",
+                    f"actual_iteration_count = {diag.get('actual_iteration_count', diag.get('actual_timesteps_len'))}",
+                    f"len(actual_timesteps) = {diag.get('actual_timesteps_len')}",
+                    f"actual timesteps 前3个: {diag.get('actual_timesteps_head3')}",
+                    f"actual timesteps 后3个: {diag.get('actual_timesteps_tail3')}",
+                    f"Transformer 去噪耗时: {diag.get('transformer_denoise_elapsed_sec')} s",
+                    f"峰值显存: {audit['gpu_peak_vram_mb']} MB",
                     "",
                     "【核心诊断数据 14 项清单】",
                     f"1. scheduler 实际类名:",
@@ -298,7 +313,7 @@ def main():
                     f"   - num_train_timesteps: {diag.get('scheduler_config', {}).get('num_train_timesteps')}",
                     "",
                     f"3. num_inference_steps 配置值:",
-                    f"   {diag.get('num_inference_steps_config', 20)}",
+                    f"   {diag.get('num_inference_steps_config', args.steps)}",
                     "",
                     f"4. 实际执行的 scheduler timestep 数量:",
                     f"   len(timesteps) = {diag.get('actual_timesteps_len')}",
@@ -361,12 +376,24 @@ def main():
                     f.write(config_content)
                 logger.info(f"  实验配置与诊断日志已写入: {run_cfg_path.name}")
 
-                # 同时写入 run_debug.txt 满足请求 7
+                # 同时写入 run_debug.txt 满足请求
                 with open(exp_dir / "run_debug.txt", "w", encoding="utf-8") as f:
                     f.write(config_content)
                 with open("run_debug.txt", "w", encoding="utf-8") as f:
                     f.write(config_content)
                 logger.info("  run_debug.txt 已同步保存至工作区根目录！")
+
+                # 按照用户要求在控制台直接打印关键去噪执行指标
+                logger.info("==================================================================")
+                logger.info(f"  configured_num_inference_steps = {args.steps}")
+                logger.info(f"  strength = {args.strength:.2f}")
+                logger.info(f"  actual_iteration_count = {diag.get('actual_iteration_count', diag.get('actual_timesteps_len'))}")
+                logger.info(f"  len(actual_timesteps) = {diag.get('actual_timesteps_len')}")
+                logger.info(f"  actual timesteps 前3个: {diag.get('actual_timesteps_head3')}")
+                logger.info(f"  actual timesteps 后3个: {diag.get('actual_timesteps_tail3')}")
+                logger.info(f"  Transformer 去噪耗时: {diag.get('transformer_denoise_elapsed_sec')} s")
+                logger.info(f"  峰值显存: {audit['gpu_peak_vram_mb']} MB")
+                logger.info("==================================================================")
         except Exception as e:
             logger.warning(f"生成微距检验图或实验归档时遇到非致命异常: {e}", exc_info=True)
 
