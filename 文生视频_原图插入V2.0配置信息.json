@@ -1,0 +1,60 @@
+{
+  "version": "2.0",
+  "name": "文生视频_原图插入V2.0配置信息",
+  "description": "数字人 832x480 电影画幅 + 首帧母本硬替换 + 关闭潜空间时序软锚定优化升级版 (Git Tag: v1.2.3)",
+  "created_at": "2026-09-11",
+  "model_architecture": {
+    "transformer": "Wan2.1-T2V-1.3B-FP16",
+    "text_encoder": "Google-UMT5-XXL-FP8",
+    "vae": "AutoencoderKLWan-FP32",
+    "scheduler": "FlowMatchEulerDiscreteScheduler",
+    "tokenizer": "Wan2.1-Tokenizer"
+  },
+  "generation_parameters": {
+    "width": 832,
+    "height": 480,
+    "aspect_ratio": "16:9",
+    "fps": 8,
+    "num_frames": 9,
+    "target_num_frames": 8,
+    "num_inference_steps": 20,
+    "strength": 0.20,
+    "guidance_scale": 2.0,
+    "seed": 42,
+    "vram_limit_gb": 3.6,
+    "enable_temporal_anchoring": false,
+    "anchor_weights": {
+      "slice_0": 1.0,
+      "slice_1": 0.0,
+      "slice_2": 0.0
+    }
+  },
+  "scheduler_config": {
+    "scheduler_class": "FlowMatchEulerDiscreteScheduler",
+    "shift": 1.0,
+    "prediction_type": "flow_prediction",
+    "num_train_timesteps": 1000
+  },
+  "post_processing": {
+    "temporal_contrast_restoration": true,
+    "temporal_contrast_ratio": 0.85,
+    "adaptive_edge_filter": true,
+    "edge_filter_threshold": 8.0
+  },
+  "diagnostics": {
+    "actual_timesteps_len": 4,
+    "actual_timesteps": [158.7368, 106.1579, 53.5789, 1.0],
+    "sigmas_head5": [1.0, 0.9474, 0.8948, 0.8423, 0.7897],
+    "sigmas_tail5": [0.1587, 0.1062, 0.0536, 0.001, 0.0],
+    "vae_encode_count": 1,
+    "vae_decode_count": 1,
+    "reencode_feedback_exists": false,
+    "clean_noisy_direct_linear_mix_exists": false
+  },
+  "inputs": {
+    "first_frame_path": "media/数字人大图正面.png",
+    "prompt": "A photorealistic mature Asian man with a natural very short shaved buzz-cut hairstyle, neat natural hairline, groomed salt-and-pepper goatee, wearing a clean plain white crewneck t-shirt with a tiny red chest logo, standing in a modern high-tech broadcast studio with ambient soft studio lighting, 8k resolution, highly detailed realistic skin texture, cinematic quality. Action: The digital avatar gently and slowly opens his eyes with a calm, composed, dignified expression, looking steadily forward at the camera, maintaining exact lips and facial bone structure of the reference photo, natural subtle head breath motion, strictly no exaggerated smile.",
+    "negative_prompt": "色调艳丽，过曝，残影，模糊，扭曲，变形，多余的肢体，多余的手指，融化的物体，低分辨率，卡通，粗糙，光晕，白雾，distorted smile, fake smirk, exaggerated grin, unnatural grimace, open mouth, wide smile, deformed lips, mismatched facial expression"
+  },
+  "rollback_command": ".venv\\Scripts\\python run_avatar_pipeline.py --shot shot_01 --width 832 --height 480 --steps 20 --strength 0.20 --seed 42 --no-temporal-anchor --output-dir run_A1 --force"
+}

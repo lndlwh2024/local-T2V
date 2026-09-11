@@ -1,0 +1,50 @@
+{
+  "version": "1.0",
+  "name": "文生视频_原图插入V1.0配置信息",
+  "description": "数字人 832x480 电影画幅 + 全时序潜空间渐进软锚定基线版本 (Git Tag: v1.2.2)",
+  "created_at": "2026-09-11",
+  "model_architecture": {
+    "transformer": "Wan2.1-T2V-1.3B-FP16",
+    "text_encoder": "Google-UMT5-XXL-FP8",
+    "vae": "AutoencoderKLWan-FP32",
+    "scheduler": "FlowMatchEulerDiscreteScheduler",
+    "tokenizer": "Wan2.1-Tokenizer"
+  },
+  "generation_parameters": {
+    "width": 832,
+    "height": 480,
+    "aspect_ratio": "16:9",
+    "fps": 8,
+    "num_frames": 9,
+    "target_num_frames": 8,
+    "num_inference_steps": 20,
+    "strength": 0.20,
+    "guidance_scale": 2.0,
+    "seed": 42,
+    "vram_limit_gb": 3.6,
+    "enable_temporal_anchoring": true,
+    "anchor_weights": {
+      "slice_0": 1.0,
+      "slice_1": 0.85,
+      "slice_2": 0.80
+    }
+  },
+  "scheduler_config": {
+    "scheduler_class": "FlowMatchEulerDiscreteScheduler",
+    "shift": 1.0,
+    "prediction_type": "flow_prediction",
+    "num_train_timesteps": 1000
+  },
+  "post_processing": {
+    "temporal_contrast_restoration": true,
+    "temporal_contrast_ratio": 0.85,
+    "adaptive_edge_filter": true,
+    "edge_filter_threshold": 8.0
+  },
+  "inputs": {
+    "first_frame_path": "media/数字人大图正面.png",
+    "prompt": "A photorealistic mature Asian man with a natural very short shaved buzz-cut hairstyle, neat natural hairline, groomed salt-and-pepper goatee, wearing a clean plain white crewneck t-shirt with a tiny red chest logo, standing in a modern high-tech broadcast studio with ambient soft studio lighting, 8k resolution, highly detailed realistic skin texture, cinematic quality. Action: The digital avatar gently and slowly opens his eyes with a calm, composed, dignified expression, looking steadily forward at the camera, maintaining exact lips and facial bone structure of the reference photo, natural subtle head breath motion, strictly no exaggerated smile.",
+    "negative_prompt": "色调艳丽，过曝，残影，模糊，扭曲，变形，多余的肢体，多余的手指，融化的物体，低分辨率，卡通，粗糙，光晕，白雾，distorted smile, fake smirk, exaggerated grin, unnatural grimace, open mouth, wide smile, deformed lips, mismatched facial expression"
+  },
+  "rollback_command": ".venv\\Scripts\\python run_avatar_pipeline.py --shot shot_01 --width 832 --height 480 --steps 20 --strength 0.20 --seed 42 --force"
+}
