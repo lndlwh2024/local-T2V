@@ -1,0 +1,53 @@
+{
+  "version": "2.3",
+  "experiment_id": "run_B2_vae_roundtrip",
+  "verdict": "Case_B",
+  "verdict_description": "VAE is healthy and high-fidelity. Temporal graying originates from lack of reference temporal latents in Slice 1 & 2 during DiT denoising.",
+  "vae_architecture": {
+    "model": "Wan2.1 AutoencoderKLWan (diffusers_vae)",
+    "dtype": "FP32",
+    "features": [
+      "slicing_enabled",
+      "tiling_enabled"
+    ]
+  },
+  "tensor_shapes": {
+    "input_rgb_video": [
+      1,
+      3,
+      9,
+      480,
+      832
+    ],
+    "encoded_latent": [
+      1,
+      16,
+      3,
+      60,
+      104
+    ],
+    "decoded_video": [
+      1,
+      3,
+      9,
+      480,
+      832
+    ],
+    "output_frames": [
+      9,
+      480,
+      832,
+      3
+    ]
+  },
+  "pixel_equality_assertion": {
+    "max_abs_input_frame_0_minus_frame_N": 0.0,
+    "status": "PASSED"
+  },
+  "measured_luma_statistics": {
+    "formula": "Y = 0.299 * R + 0.587 * G + 0.114 * B",
+    "dynamic_range_drop_ratio": 0.0016,
+    "min_luma_lift": 0.0,
+    "max_mae_vs_frame0": 0.8581
+  }
+}
