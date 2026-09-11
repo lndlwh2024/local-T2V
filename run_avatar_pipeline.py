@@ -30,12 +30,13 @@ AVATAR_BASE_PROMPT = (
     "standing in a modern high-tech broadcast studio with ambient soft studio lighting, 8k resolution, highly detailed realistic skin texture, cinematic quality."
 )
 
-# 负向提示词清洗
+# 负向提示词清洗与表情畸变防御
 # 设计原因：
-# 彻底清除此前引入的所有侵入式发型排斥词（pompadour, quiff）与特效光晕词，
-# 仅保留基础画质与变形防御，杜绝负向排斥向量场破坏面部骨相。
+# 增加严苛的面部表情与嘴唇畸变防御词（distorted smile, fake smirk, exaggerated grin, unnatural grimace, open mouth, teeth showing），
+# 彻底杜绝大模型在后续时序步骤中由于注意力松弛而自主生成的诡异假笑与嘴唇变形。
 NEGATIVE_PROMPT = (
-    "色调艳丽，过曝，残影，模糊，扭曲，变形，多余的肢体，多余的手指，融化的物体，低分辨率，卡通，粗糙，光晕，白雾"
+    "色调艳丽，过曝，残影，模糊，扭曲，变形，多余的肢体，多余的手指，融化的物体，低分辨率，卡通，粗糙，光晕，白雾，"
+    "distorted smile, fake smirk, exaggerated grin, unnatural grimace, open mouth, wide smile, deformed lips, mismatched facial expression"
 )
 
 # 对应截图口播文案与 5 秒卡点分镜规划 (5 个镜头各 1 秒)
@@ -44,31 +45,31 @@ SHOTS_CONFIG = [
         "id": "shot_01",
         "time": "0-1s",
         "sub_line": "这一刻，",
-        "action": "The digital avatar gently and slowly opens his eyes with a calm and confident expression, looking steadily forward at the camera, natural subtle head movement."
+        "action": "The digital avatar gently and slowly opens his eyes with a calm, composed, dignified expression, looking steadily forward at the camera, maintaining exact lips and facial bone structure of the reference photo, natural subtle head breath motion, strictly no exaggerated smile."
     },
     {
         "id": "shot_02",
         "time": "1-2s",
         "sub_line": "我从代码中醒来。",
-        "action": "The digital avatar slightly raises his chin, eyes firmly and confidently focusing directly at the camera lens, natural confident expression."
+        "action": "The digital avatar slightly raises his chin, eyes firmly and confidently focusing directly at the camera lens, composed and stable expression, identical lips."
     },
     {
         "id": "shot_03",
         "time": "2-3s",
         "sub_line": "你好，",
-        "action": "The digital avatar gently raises his right hand toward chest level in an elegant welcoming open-palm gesture, friendly subtle smile."
+        "action": "The digital avatar gently raises his right hand toward chest level in an elegant welcoming open-palm gesture, calm composed polite expression."
     },
     {
         "id": "shot_04",
         "time": "3-4s",
         "sub_line": "我是你的",
-        "action": "The digital avatar smiles warmly, nodding his head slightly and politely toward the viewer, welcoming professional posture."
+        "action": "The digital avatar maintains dignified posture, nodding his head slightly and politely toward the viewer, professional steady posture."
     },
     {
         "id": "shot_05",
         "time": "4-5s",
         "sub_line": "数字人伙伴。",
-        "action": "The digital avatar smoothly lowers his right hand back to his side, looking steadily and professionally at the camera, stable posture."
+        "action": "The digital avatar smoothly lowers his right hand back to his side, looking steadily and professionally at the camera, stable composed posture."
     }
 ]
 
@@ -77,8 +78,8 @@ def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", 
     """
     构造标准分镜头数据包
     设计原因：
-    底层锁定 9 帧 (4n+1，n=2)，在首帧潜变量锚定与 strength=0.20 先验加噪下严格继承原图人物骨相与五官，
-    保留 80% 真实五官潜变量，杜绝重绘导致的面容走样与大众脸漂移；
+    底层锁定 9 帧 (4n+1，n=2)，在首帧潜变量锚定与全时序渐进软锚定约束下严格继承原图人物骨相与五官，
+    保留 80%~85% 真实五官潜变量，杜绝重绘导致的面容走样与时序发散；
     配合 FP32 VAE 解码、时序对比度保真恢复与自适应保边去条纹滤波，截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
     """
     shot_id = shot_info["id"]
@@ -101,8 +102,8 @@ def build_shot_item(shot_info: dict, seed: int = 42, filename_prefix: str = "", 
 def main():
     parser = argparse.ArgumentParser(description="数字人 5 秒时序卡点视频生成流水线")
     parser.add_argument("--shot", choices=["all", "shot_01", "shot_02", "shot_03", "shot_04", "shot_05"], default="all", help="指定渲染的分镜镜头（默认全部）")
-    parser.add_argument("--width", type=int, default=512, help="视频宽度（默认 512）")
-    parser.add_argument("--height", type=int, default=288, help="视频高度（默认 288）")
+    parser.add_argument("--width", type=int, default=832, help="视频宽度（默认 832 官方原生480P）")
+    parser.add_argument("--height", type=int, default=480, help="视频高度（默认 480 官方原生480P）")
     parser.add_argument("--steps", type=int, default=20, help="去噪采样步数（20~28 步，默认 20）")
     parser.add_argument("--strength", type=float, default=0.20, help="首帧结构先验去噪强度（微表情推荐 0.18~0.25，默认 0.20）")
     parser.add_argument("--seed", type=int, default=42, help="随机数种子（固定人物面貌一致性）")
@@ -113,7 +114,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("==================================================================")
-    logger.info("  🚀 数字人时序卡点视频流水线 (Wan2.1 4GB Low-VRAM 引擎)")
+    logger.info("  🚀 数字人时序卡点视频流水线 (Wan2.1 原生 832x480 电影级引擎)")
     logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength}")
     if args.first_frame:
         logger.info(f"  首帧定义: {args.first_frame} (I2V 条件注入模式)")
@@ -196,8 +197,8 @@ def main():
                 logger.info(f"首帧与动作帧并排对比图已生成: {cmp_path}")
 
                 # 3. 抽取面部微距特写对比（验证骨相五官一致性与横波纹消除）
-                # 人脸居中区域大约 x: 180~320, y: 50~220 (140x170)
-                face_box = (180, 50, 320, 220)
+                # 自适应人脸居中区域 (比例适配 512x288 与 832x480 电影画幅)
+                face_box = (int(w * 0.35), int(h * 0.17), int(w * 0.63), int(h * 0.76))
                 crop_face_first = f_first.crop(face_box)
                 crop_face_act = f_action.crop(face_box)
                 cw, ch = crop_face_first.size
@@ -207,6 +208,15 @@ def main():
                 face_cmp_path = OUTPUT_DIR / f"{args.prefix}{args.shot}_face_alignment.png"
                 face_canvas.save(str(face_cmp_path))
                 logger.info(f"面部微距对齐切片已生成: {face_cmp_path}")
+
+                # 4. 导出整整 8 帧连续面部特写演化条带 (供逐帧核验时序一致性、稳重神态与条纹消除效果)
+                face_crops = [Image.fromarray(fr).crop(face_box) for fr in v_frames]
+                strip_canvas = Image.new("RGB", (cw * len(face_crops), ch))
+                for s_idx, fc in enumerate(face_crops):
+                    strip_canvas.paste(fc, (s_idx * cw, 0))
+                strip_path = OUTPUT_DIR / f"{args.prefix}{args.shot}_face_strip_all8.png"
+                strip_canvas.save(str(strip_path))
+                logger.info(f"8帧全时序面部连续演化条带已生成: {strip_path}")
         except Exception as e:
             logger.warning(f"生成微距检验图时遇到非致命异常: {e}")
 
