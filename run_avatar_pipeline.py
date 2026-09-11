@@ -81,13 +81,14 @@ def build_shot_item(
     first_frame_path: str = None,
     strength: float = 0.20,
     enable_temporal_anchoring: bool = True,
-    enable_post_processing: bool = True
+    enable_post_processing: bool = True,
+    use_full_sequence_reference: bool = True
 ) -> dict:
     """
     构造标准分镜头数据包
     设计原因：
-    底层锁定 9 帧 (4n+1，n=2)，在首帧潜变量锚定约束下严格继承原图人物骨相与五官；
-    配合 FP32 VAE 解码、时序对比度保真恢复与自适应保边去条纹滤波，截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
+    底层锁定 9 帧 (4n+1，n=2)，支持全时序潜变量一次性因果编码 (use_full_sequence_reference)；
+    配合 FP32 VAE 解码、可选后处理滤波，截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
     """
     shot_id = shot_info["id"]
     full_prompt = f"{AVATAR_BASE_PROMPT} Action: {shot_info['action']}"
@@ -99,6 +100,7 @@ def build_shot_item(
         "strength": strength,
         "enable_temporal_anchoring": enable_temporal_anchoring,
         "enable_post_processing": enable_post_processing,
+        "use_full_sequence_reference": use_full_sequence_reference,
         "num_frames": 9,
         "target_num_frames": 8,
         "seed": seed,
@@ -122,15 +124,19 @@ def main():
     parser.add_argument("--output", type=str, default="avatar_speech_5s.mp4", help="最终成品视频文件名")
     parser.add_argument("--no-temporal-anchor", action="store_true", help="关闭 Progressive Temporal Identity Anchoring (实验 A1)")
     parser.add_argument("--no-post-process", action="store_true", help="关闭后处理与逐帧自动归一化，仅输出原始解码结果 (实验 B1)")
-    parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_A1 或 run_B1_raw_decode）")
+    parser.add_argument("--no-full-sequence-reference", action="store_true", help="关闭全时序参考潜变量初始化，退回旧版单帧广播模式")
+    parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_B3_full_sequence_reference）")
     args = parser.parse_args()
 
     enable_anchor = not args.no_temporal_anchor
     enable_post = not args.no_post_process
+    use_full_seq = not args.no_full_sequence_reference
+
     logger.info("==================================================================")
     logger.info("  🚀 数字人时序卡点视频流水线 (Wan2.1 原生 832x480 电影级引擎)")
     logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength}")
     logger.info(f"  潜空间时序锚定: {'【已关闭】(实验 A1: Frame 1~8 anchor_weight = 0)' if not enable_anchor else '【开启】(渐进软锚定 85%/80%)'}")
+    logger.info(f"  参考潜变量模式: {'【全时序参考初始化 (实验 B3)】(9帧全同张量 VAE 一次性编码真实 z_ref_seq T=3)' if use_full_seq else '【单帧广播模式】(旧版单帧重复 3 次)'}")
     logger.info(f"  后处理管线: {'【已彻底关闭】(实验 B1: 跳过对比度校准与垂直滤波，禁止逐帧归一化，仅输出 raw decode 帧)' if not enable_post else '【开启】(时序动态对比度校准 + 自适应垂直保边滤波)'}")
     if args.first_frame:
         logger.info(f"  首帧定义: {args.first_frame} (I2V 条件注入模式)")
@@ -144,6 +150,7 @@ def main():
         strength=args.strength,
         enable_temporal_anchoring=enable_anchor,
         enable_post_processing=enable_post,
+        use_full_sequence_reference=use_full_seq,
         width=args.width,
         height=args.height,
         num_frames=9,
@@ -169,7 +176,8 @@ def main():
             first_frame_path=args.first_frame,
             strength=args.strength,
             enable_temporal_anchoring=enable_anchor,
-            enable_post_processing=enable_post
+            enable_post_processing=enable_post,
+            use_full_sequence_reference=use_full_seq
         ) for s in targets_info
     ]
 
@@ -256,11 +264,17 @@ def main():
                 exp_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"正在保存实验数据至目录: {exp_dir.resolve()} ...")
 
-                # 1. 保存 frame_0.png ~ frame_7.png
+                # 1. 保存 frame_0.png ~ frame_7.png 与未替换的 raw_decoded_frame_0_before_replacement.png
                 for f_idx, fr in enumerate(v_frames[:8]):
                     f_path = exp_dir / f"frame_{f_idx}.png"
                     Image.fromarray(fr).save(str(f_path))
                     logger.info(f"  已导出原始画幅帧: {f_path.name}")
+
+                raw_f0 = shot_res.get("raw_frame_0_before_replace")
+                if raw_f0 is not None:
+                    raw_f0_path = exp_dir / "raw_decoded_frame_0_before_replacement.png"
+                    Image.fromarray(raw_f0).save(str(raw_f0_path))
+                    logger.info(f"  【实验 B3】已导出未替换原图的原始生成第0帧: {raw_f0_path.name}")
 
                 # 2. 生成 contact_sheet.png (2x4 网格布局，清晰排版并带标签)
                 cols = 4
@@ -278,10 +292,11 @@ def main():
                     y = row * (h + banner_h)
 
                     if idx == 0:
-                        label = "Frame 0 (Reference Anchor: 100%)"
+                        label = "Frame 0 (Replaced with Reference Image)"
                     else:
                         anchor_tag = "Anchor: 0%" if not enable_anchor else ("Anchor: 85%" if idx <= 4 else "Anchor: 80%")
-                        label = f"Frame {idx} ({anchor_tag})"
+                        ref_tag = "B3: FullSeq Ref" if use_full_seq else "B1: Single Broadcast"
+                        label = f"Frame {idx} ({anchor_tag} | {ref_tag})"
 
                     draw.rectangle([x, y, x + w, y + banner_h], fill=(32, 32, 32))
                     draw.text((x + 16, y + 10), label, fill=(240, 240, 240))
@@ -299,6 +314,11 @@ def main():
 
                 # 4. 导出 run_config.txt (包含 14 项完整诊断数据与配置)
                 diag = shot_res.get("diagnostics", audit.get("diagnostics", {}))
+                luma_stats = diag.get("frames_luma_stats", {})
+                latent_stats = diag.get("latent_evolution_stats", {})
+                ref_shapes = diag.get("ref_shapes_info", {})
+                deltas = luma_stats.get("frame1_to_frame7_deltas", {})
+
                 diag_lines = [
                     "=" * 80,
                     "          Wan2.1 运行时诊断与实验配置报告 (Runtime Diagnostics & Config)",
@@ -306,6 +326,7 @@ def main():
                     f"实验目录: {exp_dir.name}",
                     f"分镜标识: {shot_res.get('id', 'shot_01')}",
                     f"时序锚定状态: {'已关闭 (enable_temporal_anchoring=False)' if not enable_anchor else '已开启'}",
+                    f"参考初始化模式: {'全时序参考潜变量初始化 (use_full_sequence_reference=True, 实验 B3)' if use_full_seq else '单帧广播初始化 (use_full_sequence_reference=False)'}",
                     "",
                     "【本轮关键执行与去噪指标】",
                     f"configured_num_inference_steps = {args.steps}",
@@ -317,6 +338,51 @@ def main():
                     f"Transformer 去噪耗时: {diag.get('transformer_denoise_elapsed_sec')} s",
                     f"峰值显存: {audit['gpu_peak_vram_mb']} MB",
                     "",
+                    "【实验 B3 潜空间 3 个 temporal slice 统计与形状审计】",
+                    f"old_ref_latent_shape = {ref_shapes.get('old_ref_latent_shape', '[1, 16, 1, 60, 104]')}",
+                    f"new_ref_latent_shape = {ref_shapes.get('new_ref_latent_shape', 'N/A')}",
+                    f"reference_temporal_latent_count = {ref_shapes.get('reference_temporal_latent_count', 'N/A')}",
+                    f"initial_latents_shape = {ref_shapes.get('initial_latents_shape', 'N/A')}",
+                    "",
+                    "--- clean_z_ref_seq 切片统计 ---",
+                ]
+
+                clean_slices = latent_stats.get("clean_z_ref_seq", {})
+                for sl_k, sl_v in clean_slices.items():
+                    diag_lines.append(f"  {sl_k}: mean={sl_v.get('mean')}, std={sl_v.get('std')}, min={sl_v.get('min')}, max={sl_v.get('max')}")
+
+                diag_lines.append("\n--- initial_latents (加噪后) 切片统计 ---")
+                init_slices = latent_stats.get("initial_latents", {})
+                for sl_k, sl_v in init_slices.items():
+                    diag_lines.append(f"  {sl_k}: mean={sl_v.get('mean')}, std={sl_v.get('std')}, min={sl_v.get('min')}, max={sl_v.get('max')}")
+
+                diag_lines.append("\n--- denoised_latent (去噪后) 切片统计 ---")
+                denoise_slices = latent_stats.get("denoised_latent", {})
+                for sl_k, sl_v in denoise_slices.items():
+                    diag_lines.append(f"  {sl_k}: mean={sl_v.get('mean')}, std={sl_v.get('std')}, min={sl_v.get('min')}, max={sl_v.get('max')}")
+
+                diag_lines.extend([
+                    "",
+                    "【RGB 帧亮度统计与 Frame 1 -> Frame 7 漂移指标】",
+                    f"A. 未替换原图的原始解码 Frame 0:",
+                ])
+                raw_f0_stat = luma_stats.get("raw_frame_0_before_replace", {})
+                diag_lines.append(f"   raw_frame_0_before_replace: mean={raw_f0_stat.get('mean_luma')}, std={raw_f0_stat.get('std_luma')}, min={raw_f0_stat.get('min_luma')}, max={raw_f0_stat.get('max_luma')}, dynamic_range={raw_f0_stat.get('dynamic_range')}")
+
+                diag_lines.append("\nB. 逐帧统计 (Frame 0 ~ 7, Frame 0 已替换原图):")
+                for f_i in range(8):
+                    f_key = f"frame_{f_i}"
+                    st = luma_stats.get(f_key, {})
+                    diag_lines.append(f"   Frame {f_i}: mean={st.get('mean_luma')}, std={st.get('std_luma')}, min={st.get('min_luma')}, max={st.get('max_luma')}, dynamic_range={st.get('dynamic_range')}")
+
+                diag_lines.extend([
+                    "\nC. Frame 1 -> Frame 7 漂移物理指标:",
+                    f"   black_level_delta    (min_luma_7 - min_luma_1)       = {deltas.get('black_level_delta', 'N/A')}",
+                    f"   highlight_delta      (max_luma_7 - max_luma_1)       = {deltas.get('highlight_delta', 'N/A')}",
+                    f"   std_delta            (std_luma_7 - std_luma_1)       = {deltas.get('std_delta', 'N/A')}",
+                    f"   dynamic_range_delta  (range_7 - range_1)             = {deltas.get('dynamic_range_delta', 'N/A')}",
+                    "",
+                    "=" * 80,
                     "【核心诊断数据 14 项清单】",
                     f"1. scheduler 实际类名:",
                     f"   {diag.get('scheduler_class', 'FlowMatchEulerDiscreteScheduler')}",
@@ -338,7 +404,7 @@ def main():
                     "",
                     f"6. sigmas 值 (如果存在):",
                     f"   - sigmas 前5个: {diag.get('sigmas_head5')}",
-                    f"   - sigmas 后5个: {diag.get('sigmas_tail5')}",
+                    f"   - 后5个值: {diag.get('sigmas_tail5')}",
                     "",
                     f"7. guidance_scale 实际值:",
                     f"   {diag.get('guidance_scale', 2.0)}",
@@ -347,7 +413,7 @@ def main():
                     f"   {diag.get('strength', 0.20)}",
                     "",
                     f"9. VAE encode 被调用的总次数:",
-                    f"   {diag.get('vae_encode_count', 1)} 次 (首帧参考图像编码为潜变量 z_ref0)",
+                    f"   {diag.get('vae_encode_count', 1)} 次 (实验 B3 9帧全同视频一次性编码真实 z_ref_seq)",
                     "",
                     f"10. VAE decode 被调用的总次数:",
                     f"   {diag.get('vae_decode_count', 1)} 次 (全分镜潜变量张量解码为视频帧)",
@@ -358,38 +424,27 @@ def main():
                     f"   - Slice 2: Frame 5 ~ Frame 8 (对应第5~8帧，因果反卷积4:1上采样区间)",
                     "",
                     f"12. 每个 slice 使用的 anchor 权重:",
-                    f"   - Slice 0 (Frame 0): {diag.get('anchor_weights', {}).get('Slice 0 (Frame 0)', 1.0)} (100% 锁定与原图直接替换)",
-                    f"   - Slice 1 (Frame 1~4): {diag.get('anchor_weights', {}).get('Slice 1 (Frame 1~4)', 0.0)} ({'anchor_weight = 0，已跳过85%锚定' if not enable_anchor else '85% 锚定'})",
-                    f"   - Slice 2 (Frame 5~8): {diag.get('anchor_weights', {}).get('Slice 2 (Frame 5~8)', 0.0)} ({'anchor_weight = 0，已跳过80%锚定' if not enable_anchor else '80% 锚定'})",
+                    f"   - Slice 0 (Frame 0): 0.0 (全局自由去噪，无步内 anchor，交付帧直接替换原图)",
+                    f"   - Slice 1 (Frame 1~4): 0.0 (anchor_weight = 0，已跳过锚定)",
+                    f"   - Slice 2 (Frame 5~8): 0.0 (anchor_weight = 0，已跳过锚定)",
                     "",
                     f"13. 是否存在 generated frame -> VAE encode -> 参与后续帧生成:",
                     f"   否 (False)。采用 3D-DiT 全局时空联合去噪，无任何生成帧重新送入 VAE 编码的自回归循环。",
                     "",
                     f"14. 是否存在 clean reference latent 直接与当前 noisy latent 做线性混合:",
-                    f"   否 (False)。去噪迭代中仅对 Slice 0 使用对应噪声水平的 target_f0，Slice 1 与 Slice 2 无混合；解码前对 Slice 0 整体直接替换。",
+                    f"   否 (False)。去噪迭代中全时序潜变量一次性加噪后正常去噪，无步内 blend/overwrite。",
                     "",
                     "=" * 80,
-                    "【后处理与解码链路状态 (实验 B1 核心审计)】",
+                    "【后处理与解码链路状态】",
                     f"A. 后处理执行状态:",
                     f"   - temporal_contrast_restoration_executed = {diag.get('temporal_contrast_restoration_executed', False)}",
                     f"   - adaptive_destripe_filter_executed = {diag.get('adaptive_destripe_filter_executed', False)}",
                     f"   - frame_level_normalization_exists = {diag.get('frame_level_normalization_exists', False)}",
                     "",
-                    f"B. 帧亮度统计 (光度学公式: Y = 0.299*R + 0.587*G + 0.114*B):",
-                ]
-
-                luma_stats = diag.get("frames_luma_stats", {})
-                for f_i in range(1, 8):
-                    f_key = f"frame_{f_i}"
-                    st = luma_stats.get(f_key, {})
-                    diag_lines.append(f"   - Frame {f_i}: mean_luma_before = {st.get('mean_luma_before', 'N/A')}, std_luma_before = {st.get('std_luma_before', 'N/A')}")
-
-                diag_lines.extend([
-                    "",
-                    f"C. 残留路径说明:",
+                    f"B. 残留路径说明:",
                     f"   {diag.get('residual_path_note', '除 VAE 原始解码与固定线性变换外，不存在任何隐式色彩/滤波处理。')}",
                     "",
-                    f"D. 输出链路说明:",
+                    f"C. 输出链路说明:",
                     f"   {diag.get('output_pipeline_note', '当前导出的是 raw decoded frames，无后处理')}",
                     "=" * 80,
                     "【恒定实验参数清单】",
@@ -402,7 +457,7 @@ def main():
                     f"- 步数: {args.steps}",
                     f"- Strength: {args.strength}",
                     f"- CFG (guidance_scale): 2.0",
-                    f"- 后处理: {'【已彻底关闭】(跳过对比度恢复与垂直滤波，无逐帧归一化，仅输出 raw decode 帧)' if not enable_post else '开启 (时序对比度校准 + 自适应垂直保边滤波)'}",
+                    f"- 后处理: {'【已彻底关闭】(跳过对比度恢复与垂直滤波，无逐帧归一化，仅输出 raw decode 帧)' if not enable_post else '开启'}",
                     f"- 显存机制: CPU/GPU 内存解耦换入换出",
                     "=" * 80,
                 ])
@@ -420,18 +475,22 @@ def main():
                     f.write(config_content)
                 logger.info("  run_debug.txt 已同步保存至工作区根目录！")
 
-                # 按照用户要求在控制台直接打印关键去噪执行指标与实验 B1 诊断指标
+                # 按照用户要求在控制台直接打印关键去噪执行指标与实验 B3 诊断指标
                 logger.info("==================================================================")
-                logger.info("  【实验 B1 关键诊断指标控制台汇总】")
-                logger.info(f"  1. 后处理状态: temporal_contrast_restoration_executed = {diag.get('temporal_contrast_restoration_executed', False)}")
-                logger.info(f"                 adaptive_destripe_filter_executed = {diag.get('adaptive_destripe_filter_executed', False)}")
-                logger.info(f"                 frame_level_normalization_exists = {diag.get('frame_level_normalization_exists', False)}")
-                logger.info(f"  2. 输出链路:   {diag.get('output_pipeline_note', '当前导出的是 raw decoded frames，无后处理')}")
-                logger.info(f"  3. 残留路径:   {diag.get('residual_path_note', '除 VAE 原始解码与固定线性变换外无隐式色彩/滤波处理')}")
-                logger.info("  4. 帧亮度统计 (Frame 1 ~ 7 光度学亮度均值与标准差):")
+                logger.info("  【实验 B3 关键诊断指标控制台汇总】")
+                logger.info(f"  1. 参考潜变量模式: use_full_sequence_reference = {use_full_seq}")
+                logger.info(f"     old_ref_shape: {ref_shapes.get('old_ref_latent_shape')} -> new_ref_shape: {ref_shapes.get('new_ref_latent_shape')}")
+                logger.info(f"  2. 后处理状态:     enable_post_processing = {enable_post}")
+                logger.info(f"  3. Frame 1 -> Frame 7 漂移物理指标:")
+                logger.info(f"     - black_level_delta:   {deltas.get('black_level_delta', 'N/A')}")
+                logger.info(f"     - highlight_delta:     {deltas.get('highlight_delta', 'N/A')}")
+                logger.info(f"     - std_delta:           {deltas.get('std_delta', 'N/A')}")
+                logger.info(f"     - dynamic_range_delta: {deltas.get('dynamic_range_delta', 'N/A')}")
+                logger.info("  4. 帧亮度统计:")
+                logger.info(f"     raw_frame_0: mean={raw_f0_stat.get('mean_luma')}, min={raw_f0_stat.get('min_luma')}, max={raw_f0_stat.get('max_luma')}, range={raw_f0_stat.get('dynamic_range')}")
                 for f_i in range(1, 8):
                     st = luma_stats.get(f"frame_{f_i}", {})
-                    logger.info(f"     Frame {f_i}: mean_luma_before = {st.get('mean_luma_before', 'N/A')}, std_luma_before = {st.get('std_luma_before', 'N/A')}")
+                    logger.info(f"     Frame {f_i}:     mean={st.get('mean_luma')}, min={st.get('min_luma')}, max={st.get('max_luma')}, range={st.get('dynamic_range')}")
                 logger.info("------------------------------------------------------------------")
                 logger.info(f"  configured_num_inference_steps = {args.steps}")
                 logger.info(f"  strength = {args.strength:.2f}")

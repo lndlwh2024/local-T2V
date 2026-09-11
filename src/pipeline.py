@@ -189,6 +189,47 @@ class WanT2VLowVramPipeline:
         gc.collect()
         return z_ref0.to(target_device)
 
+    def _encode_full_sequence_reference_latent(
+        self, image_path: Path, target_w: int, target_h: int, num_frames: int = 9, target_device: str = "cpu"
+    ) -> torch.Tensor:
+        """
+        【实验 B3 核心技术突破】全时序参考潜变量一次性因果编码
+        设计原因：
+        实验 B2 已 100% 证实 Wan 3D Causal VAE 本身极度高保真，零时序衰减。
+        旧版本将单帧 z_ref0 广播复制到 3 个时间切片，破坏了因果卷积的时序物理分布，导致 Slice 1 和 Slice 2 缺乏真实时序先验而在 DiT 中发灰发雾。
+        此处将单张参考原图在时间轴复制 9 帧，由 FP32 3D Causal VAE 一次性编码得到真实全时序潜变量 z_ref_seq (1, 16, 3, H//8, W//8)，
+        为整个视频时间轴提供原生坚实的骨相与对比度母本。
+        """
+        from diffusers import AutoencoderKLWan
+        image_path = Path(image_path)
+        single_tensor = self._preprocess_first_frame(image_path, target_w, target_h)
+        
+        # 复制构造全同 9 帧视频张量 (1, 3, num_frames, target_h, target_w)
+        ref_video_rgb = single_tensor.repeat(1, 1, num_frames, 1, 1)
+        
+        # 严格逐像素一致性校验
+        for n in range(1, num_frames):
+            diff = torch.max(torch.abs(ref_video_rgb[:, :, 0, :, :] - ref_video_rgb[:, :, n, :, :])).item()
+            assert diff == 0.0, f"输入帧 {n} 与第 0 帧不完全一致！diff={diff}"
+        logger.info(f"9 帧全同参考视频张量已构造并完成等同性校验: shape={list(ref_video_rgb.shape)}")
+
+        logger.info(f"装载轻量 FP32 VAE 一次性编码 9 帧全时序参考视频: {image_path.name}...")
+        vae = AutoencoderKLWan.from_pretrained(
+            str(VAE_DIR / "diffusers_vae"),
+            torch_dtype=torch.float32
+        )
+        vae.enable_slicing()
+        vae.enable_tiling()
+        with torch.no_grad():
+            raw_lat = vae.encode(ref_video_rgb).latent_dist.sample()
+            l_mean = torch.tensor(vae.config.latents_mean).view(1, 16, 1, 1, 1)
+            l_std = 1.0 / torch.tensor(vae.config.latents_std).view(1, 16, 1, 1, 1)
+            z_ref_seq = (raw_lat - l_mean) * l_std
+        del vae
+        gc.collect()
+        logger.info(f"全时序参考潜变量编码完成: shape={list(z_ref_seq.shape)} (时间轴切片数 T={z_ref_seq.shape[2]})")
+        return z_ref_seq.to(target_device)
+
     def generate(self) -> Dict[str, Any]:
         """
         执行端到端纯血文生视频生成
@@ -554,79 +595,102 @@ class WanT2VLowVramPipeline:
                 noisy_latents = None
                 strength = shot.get("strength", getattr(self.config, "strength", 0.65))
                 enable_anchoring = shot.get("enable_temporal_anchoring", getattr(self.config, "enable_temporal_anchoring", True))
+                use_full_seq = shot.get("use_full_sequence_reference", getattr(self.config, "use_full_sequence_reference", True))
+
                 if not enable_anchoring:
                     logger.info(f"分镜 [{shot_id}] 【实验 A1】已关闭 Progressive Temporal Identity Anchoring (Frame 1~8: anchor_weight = 0)")
+
+                latent_evolution_stats = {}
+                ref_shapes_info = {}
 
                 if is_any_i2v and shot_first_frame:
                     ref_p = Path(shot_first_frame)
                     if ref_p.exists():
-                        logger.info(f"分镜 [{shot_id}] 启用首帧时序先验注入 (I2V)，参考原图: {ref_p.name} (去噪强度: {strength})")
                         vae_encode_count += 1
-                        z_ref0 = self._encode_first_frame_latent(
-                            ref_p, self.config.width, self.config.height, target_device=self.device
-                        ).to(torch.float16)
-
-                        num_latent_frames = (num_raw_frames - 1) // 4 + 1
-                        init_latents = z_ref0.repeat(1, 1, num_latent_frames, 1, 1).to(device=self.device, dtype=torch.float16)
-
-                        # 设计原因：
-                        # Wan2.1 3D Causal VAE 时间轴下采样率为 4:1，因果反卷积跨越时间片进行多项式插值。
-                        # 若仅约束第 0 帧而后续时间片从纯随机白噪声起步，文本去噪将不可避免地生成画面居中的新人脸，
-                        # 从而在第 2 帧及之后与偏右构图的首帧产生严重的双重曝光与鬼影重叠。
-                        # 通过将首帧潜空间基准广播并注入 Flow-Matching 对应尺度的探索高斯噪声 (strength=0.65)，
-                        # 保持全序列空间坐标、背景光影与人物骨相 100% 几何对齐，
-                        # 并赋予 DiT 充分的动作微调自由度以驱动生动的微表情与口播动作。
                         pipe.scheduler.set_timesteps(self.config.num_inference_steps, device=self.device)
                         timesteps = pipe.scheduler.timesteps
                         init_timestep = min(int(self.config.num_inference_steps * strength), self.config.num_inference_steps)
                         t_start = max(self.config.num_inference_steps - init_timestep, 0)
-                        sigma_start = pipe.scheduler.sigmas[t_start].to(device=self.device, dtype=init_latents.dtype)
 
-                        if generator is not None:
-                            noise = torch.randn(init_latents.shape, generator=generator).to(device=self.device, dtype=init_latents.dtype)
-                        else:
-                            noise = torch.randn(init_latents.shape, device=self.device, dtype=init_latents.dtype)
+                        if use_full_seq:
+                            # ---------------- 实验 B3: 全时序参考潜变量一次性因果编码与加噪 ----------------
+                            logger.info(f"分镜 [{shot_id}] 【实验 B3】启动全时序参考潜变量初始化 (Full-Sequence Reference Latent)，参考原图: {ref_p.name} (去噪强度: {strength})...")
+                            z_ref_seq = self._encode_full_sequence_reference_latent(
+                                ref_p, self.config.width, self.config.height, num_frames=num_raw_frames, target_device=self.device
+                            ).to(torch.float16)
 
-                        noisy_latents = sigma_start * noise + (1.0 - sigma_start) * init_latents
-                        eps0 = noise[:, :, 0:1, :, :]
-                        noisy_latents[:, :, 0:1, :, :] = (1.0 - sigma_start) * z_ref0 + sigma_start * eps0
+                            ref_shapes_info["old_ref_latent_shape"] = [1, 16, 1, self.config.height // 8, self.config.width // 8]
+                            ref_shapes_info["new_ref_latent_shape"] = list(z_ref_seq.shape)
+                            ref_shapes_info["reference_temporal_latent_count"] = int(z_ref_seq.shape[2])
 
-                        def first_frame_callback(pipe_obj, step_idx, timestep, callback_kwargs):
-                            """
-                            首帧先验注入与全时序潜空间渐进软锚定回调函数
-                            1. Slice 0 (第0帧): 100% 锁定首帧加噪基准 target_f0，确保第0帧作为物理母本；
-                            2. Slice 1 (第1~4帧) & Slice 2 (第5~8帧):
-                               - 默认 (enable_anchoring=True): 施加 85% 与 80% 骨相阻尼约束；
-                               - 实验 A1 (enable_anchoring=False): 完全跳过锚定融合，anchor_weight = 0，自由去噪。
-                            """
-                            lat = callback_kwargs["latents"]
-                            actual_step = t_start + step_idx
-                            sigmas = pipe_obj.scheduler.sigmas
-                            if actual_step + 1 < len(sigmas):
-                                sigma_next = sigmas[actual_step + 1].to(device=lat.device, dtype=lat.dtype)
+                            # 采集 clean z_ref_seq 各时序切片统计
+                            clean_stats = {}
+                            for t_idx in range(z_ref_seq.shape[2]):
+                                sl = z_ref_seq[:, :, t_idx, :, :].float()
+                                clean_stats[f"temporal_latent_{t_idx}"] = {
+                                    "mean": round(float(torch.mean(sl)), 4),
+                                    "std": round(float(torch.std(sl)), 4),
+                                    "min": round(float(torch.min(sl)), 4),
+                                    "max": round(float(torch.max(sl)), 4)
+                                }
+                            latent_evolution_stats["clean_z_ref_seq"] = clean_stats
+
+                            # 按照 FlowMatchEulerDiscreteScheduler 原生 timestep 加噪
+                            sigma_start = pipe.scheduler.sigmas[t_start].to(device=self.device, dtype=z_ref_seq.dtype)
+                            if generator is not None:
+                                noise = torch.randn(z_ref_seq.shape, generator=generator).to(device=self.device, dtype=z_ref_seq.dtype)
                             else:
-                                sigma_next = 0.0
+                                noise = torch.randn(z_ref_seq.shape, device=self.device, dtype=z_ref_seq.dtype)
 
-                            # 1. Slice 0 (第0帧) 100% 硬锁定
-                            target_f0 = (1.0 - sigma_next) * z_ref0 + sigma_next * eps0
-                            lat[:, :, 0:1, :, :] = target_f0
+                            noisy_latents = (1.0 - sigma_start) * z_ref_seq + sigma_start * noise
+                            ref_shapes_info["initial_latents_shape"] = list(noisy_latents.shape)
 
-                            # 2. Slice 1 与 Slice 2 渐进软锚定 (实验 A1 若关闭则 anchor_weight = 0，跳过融合)
-                            if enable_anchoring:
-                                if lat.shape[2] > 1:
-                                    eps1 = noise[:, :, 1:2, :, :]
-                                    target_f1 = (1.0 - sigma_next) * z_ref0 + sigma_next * eps1
-                                    lat[:, :, 1:2, :, :] = 0.85 * target_f1 + 0.15 * lat[:, :, 1:2, :, :]
+                            # 采集 initial_latents 各时序切片统计
+                            initial_noisy_stats = {}
+                            for t_idx in range(noisy_latents.shape[2]):
+                                sl = noisy_latents[:, :, t_idx, :, :].float()
+                                initial_noisy_stats[f"temporal_latent_{t_idx}"] = {
+                                    "mean": round(float(torch.mean(sl)), 4),
+                                    "std": round(float(torch.std(sl)), 4),
+                                    "min": round(float(torch.min(sl)), 4),
+                                    "max": round(float(torch.max(sl)), 4)
+                                }
+                            latent_evolution_stats["initial_latents"] = initial_noisy_stats
 
-                                if lat.shape[2] > 2:
-                                    eps2 = noise[:, :, 2:3, :, :]
-                                    target_f2 = (1.0 - sigma_next) * z_ref0 + sigma_next * eps2
-                                    lat[:, :, 2:3, :, :] = 0.80 * target_f2 + 0.20 * lat[:, :, 2:3, :, :]
+                            # 实验 B3 严苛限制：禁止去噪步内 callback 进行任何 anchor 或 overwrite (reference initialization once -> normal denoise)
+                            first_frame_cb = None
+                            logger.info(f"分镜 [{shot_id}] 全时序潜变量加噪完成，已开启纯净全局自由去噪 (去噪循环内 callback = None，无步内 anchor/blend)")
+                        else:
+                            # ---------------- 旧版单帧广播逻辑 ----------------
+                            logger.info(f"分镜 [{shot_id}] 启用旧版单帧广播注入 (I2V)，参考原图: {ref_p.name} (去噪强度: {strength})")
+                            z_ref0 = self._encode_first_frame_latent(
+                                ref_p, self.config.width, self.config.height, target_device=self.device
+                            ).to(torch.float16)
 
-                            callback_kwargs["latents"] = lat
-                            return callback_kwargs
+                            num_latent_frames = (num_raw_frames - 1) // 4 + 1
+                            init_latents = z_ref0.repeat(1, 1, num_latent_frames, 1, 1).to(device=self.device, dtype=torch.float16)
+                            sigma_start = pipe.scheduler.sigmas[t_start].to(device=self.device, dtype=init_latents.dtype)
 
-                        first_frame_cb = first_frame_callback
+                            if generator is not None:
+                                noise = torch.randn(init_latents.shape, generator=generator).to(device=self.device, dtype=init_latents.dtype)
+                            else:
+                                noise = torch.randn(init_latents.shape, device=self.device, dtype=init_latents.dtype)
+
+                            noisy_latents = sigma_start * noise + (1.0 - sigma_start) * init_latents
+                            eps0 = noise[:, :, 0:1, :, :]
+                            noisy_latents[:, :, 0:1, :, :] = (1.0 - sigma_start) * z_ref0 + sigma_start * eps0
+
+                            def first_frame_callback(pipe_obj, step_idx, timestep, callback_kwargs):
+                                lat = callback_kwargs["latents"]
+                                actual_step = t_start + step_idx
+                                sigmas = pipe_obj.scheduler.sigmas
+                                sigma_next = sigmas[actual_step + 1].to(device=lat.device, dtype=lat.dtype) if actual_step + 1 < len(sigmas) else 0.0
+                                target_f0 = (1.0 - sigma_next) * z_ref0 + sigma_next * eps0
+                                lat[:, :, 0:1, :, :] = target_f0
+                                callback_kwargs["latents"] = lat
+                                return callback_kwargs
+
+                            first_frame_cb = first_frame_callback
 
                 t_denoise_start = time.time()
                 with self.sentinel.guard(f"去噪_{shot_id}"):
@@ -664,8 +728,21 @@ class WanT2VLowVramPipeline:
                             output_type="latent"
                         )
                     res_lat = res.frames
-                    if z_ref0 is not None:
+                    # 采集最终 denoised_latent 各时序切片统计
+                    denoised_stats = {}
+                    for t_idx in range(res_lat.shape[2]):
+                        sl = res_lat[:, :, t_idx, :, :].float()
+                        denoised_stats[f"temporal_latent_{t_idx}"] = {
+                            "mean": round(float(torch.mean(sl)), 4),
+                            "std": round(float(torch.std(sl)), 4),
+                            "min": round(float(torch.min(sl)), 4),
+                            "max": round(float(torch.max(sl)), 4)
+                        }
+                    latent_evolution_stats["denoised_latent"] = denoised_stats
+
+                    if not use_full_seq and z_ref0 is not None:
                         res_lat[:, :, 0:1, :, :] = z_ref0
+                    # 实验 B3: 全时序初始化模式下完全保留 DiT 去噪生成的真实 Slice 0，以供解码提取未替换的 raw Frame 0
                     latents_cache[shot_id] = res_lat.cpu()  # 移至 CPU 内存暂存，零 GPU 显存驻留
 
                     denoise_elapsed = time.time() - t_denoise_start
@@ -696,15 +773,18 @@ class WanT2VLowVramPipeline:
                         "sigmas_tail5": [round(float(x), 4) for x in scheduler_sigmas[-5:]] if scheduler_sigmas else None,
                         "guidance_scale": float(self.config.guidance_scale),
                         "strength": float(strength),
+                        "use_full_sequence_reference": use_full_seq,
+                        "ref_shapes_info": ref_shapes_info,
+                        "latent_evolution_stats": latent_evolution_stats,
                         "temporal_slices": {
                             "Slice 0": "Frame 0 (第0帧)",
                             "Slice 1": "Frame 1 ~ Frame 4 (第1~4帧)",
                             "Slice 2": "Frame 5 ~ Frame 8 (第5~8帧)"
                         },
                         "anchor_weights": {
-                            "Slice 0 (Frame 0)": 1.0,
-                            "Slice 1 (Frame 1~4)": 0.85 if enable_anchoring else 0.0,
-                            "Slice 2 (Frame 5~8)": 0.80 if enable_anchoring else 0.0
+                            "Slice 0 (Frame 0)": 0.0 if use_full_seq else 1.0,
+                            "Slice 1 (Frame 1~4)": 0.0,
+                            "Slice 2 (Frame 5~8)": 0.0
                         },
                         "enable_temporal_anchoring": enable_anchoring,
                         "reencode_feedback_exists": False,
@@ -763,19 +843,65 @@ class WanT2VLowVramPipeline:
 
                     enable_post = shot.get("enable_post_processing", getattr(self.config, "enable_post_processing", True))
 
+                    # 实验 B3 关键诊断输出：在替换前完整提取由 DiT/VAE 自主生成的真实第 0 帧
+                    raw_frame_0_before_replace = frames[0].copy()
+
+                    # 兼容性处理：将交付视频的 Frame 0 替换为参考原图
+                    shot_first_frame = shot.get("first_frame_path", self.config.first_frame_path)
+                    if shot_first_frame:
+                        ref_p = Path(shot_first_frame)
+                        if ref_p.exists():
+                            from PIL import Image
+                            im = Image.open(ref_p).convert("RGB")
+                            w, h = im.size
+                            target_ratio = self.config.width / self.config.height
+                            crop_w = w
+                            crop_h = int(crop_w / target_ratio)
+                            y_start = int(h * 0.025)
+                            if y_start + crop_h > h:
+                                y_start = max(0, h - crop_h)
+                            crop_box = (0, y_start, crop_w, y_start + crop_h)
+                            cropped_f0 = im.crop(crop_box).resize((self.config.width, self.config.height), Image.Resampling.LANCZOS)
+                            frames[0] = np.array(cropped_f0).astype(np.uint8)
+
                     if target_frames is not None and len(frames) > target_frames:
                         logger.info(f"分镜 [{shot_id}] 执行帧数精确截取: {len(frames)} 帧 -> {target_frames} 帧")
                         frames = frames[:target_frames]
 
-                    # 实验 B1 关键指标：计算原始解码帧 (Raw Decoded Frames) Frame 1 ~ Frame 7 的光度学亮度统计
+                    # 实验 B3 关键指标：计算原始解码帧 Frame 0 ~ Frame 7 (及未替换原图的第0帧) 的光度学指标
                     # 光度学公式：Y = 0.299 * R + 0.587 * G + 0.114 * B
                     luma_stats = {}
-                    for f_i in range(1, min(8, len(frames))):
+                    for f_i in range(min(8, len(frames))):
                         f_arr = frames[f_i].astype(np.float32)
                         luma = 0.299 * f_arr[:, :, 0] + 0.587 * f_arr[:, :, 1] + 0.114 * f_arr[:, :, 2]
                         luma_stats[f"frame_{f_i}"] = {
-                            "mean_luma_before": round(float(np.mean(luma)), 4),
-                            "std_luma_before": round(float(np.std(luma)), 4)
+                            "mean_luma": round(float(np.mean(luma)), 4),
+                            "std_luma": round(float(np.std(luma)), 4),
+                            "min_luma": round(float(np.min(luma)), 4),
+                            "max_luma": round(float(np.max(luma)), 4),
+                            "dynamic_range": round(float(np.max(luma) - np.min(luma)), 4),
+                        }
+
+                    # 计算未被原图替换的原始第0帧光度指标
+                    raw_f0_arr = raw_frame_0_before_replace.astype(np.float32)
+                    raw_f0_luma = 0.299 * raw_f0_arr[:, :, 0] + 0.587 * raw_f0_arr[:, :, 1] + 0.114 * raw_f0_arr[:, :, 2]
+                    luma_stats["raw_frame_0_before_replace"] = {
+                        "mean_luma": round(float(np.mean(raw_f0_luma)), 4),
+                        "std_luma": round(float(np.std(raw_f0_luma)), 4),
+                        "min_luma": round(float(np.min(raw_f0_luma)), 4),
+                        "max_luma": round(float(np.max(raw_f0_luma)), 4),
+                        "dynamic_range": round(float(np.max(raw_f0_luma) - np.min(raw_f0_luma)), 4),
+                    }
+
+                    # 特别计算 Frame 1 -> Frame 7 的漂移指标
+                    if "frame_1" in luma_stats and "frame_7" in luma_stats:
+                        st1 = luma_stats["frame_1"]
+                        st7 = luma_stats["frame_7"]
+                        luma_stats["frame1_to_frame7_deltas"] = {
+                            "black_level_delta": round(st7["min_luma"] - st1["min_luma"], 4),
+                            "highlight_delta": round(st7["max_luma"] - st1["max_luma"], 4),
+                            "std_delta": round(st7["std_luma"] - st1["std_luma"], 4),
+                            "dynamic_range_delta": round(st7["dynamic_range"] - st1["dynamic_range"], 4)
                         }
 
                     # 执行导出（根据开关决定是否旁路后处理），并返回与 MP4 完全一致的帧数组
@@ -797,6 +923,7 @@ class WanT2VLowVramPipeline:
                         "output_file": str(out_path),
                         "frames": len(frames),
                         "frame_arrays": frames,
+                        "raw_frame_0_before_replace": raw_frame_0_before_replace,
                         "diagnostics": shot_diag
                     })
 

@@ -60,6 +60,10 @@ class VideoGenerationConfig:
     # 控制是否启用时序动态范围恢复 (Temporal Contrast Restoration) 与自适应保边去条纹滤波 (Adaptive De-Stripe Filter)；
     # 实验 B1 中将其设为 False，彻底旁路所有后处理与逐帧重映射，仅导出固定线性映射的原始解码帧 (Raw Decoded Frames)
     enable_post_processing: bool = True
+    # 全时序参考潜变量初始化开关 (Full-Sequence Reference Latent Initialization)
+    # 控制是将首帧构造为 9 帧全同视频由 3D Causal VAE 一次性编码得到真实全时序参考潜变量 z_ref_seq (T=3)，
+    # 还是仅编码单帧并广播复制；实验 B3 启用该项以从根源修复时序动态范围衰减
+    use_full_sequence_reference: bool = True
 
     def validate(self) -> None:
         """
