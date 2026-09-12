@@ -1,0 +1,47 @@
+{
+  "version": "2.6",
+  "experiment_series": "Phase_C_Sweet_Spot_Search",
+  "status": "completed_production_ready",
+  "production_sweet_spot": {
+    "best_experiment": "run_C2_strength030",
+    "optimal_strength": 0.3,
+    "actual_iteration_count": 15,
+    "dynamic_range_attenuation": "0.86%",
+    "black_level_delta": 0.854,
+    "evaluation": "Optimal trade-off: vivid natural micro-actions with zero wave, zero haze, and rock-solid identity."
+  },
+  "comparison_matrix": {
+    "B3_strength020": {
+      "strength": 0.2,
+      "steps": 10,
+      "black_level_delta": -0.798,
+      "dr_delta": -0.316,
+      "dr_attenuation": "0.12%",
+      "status": "too_static"
+    },
+    "C1_strength025": {
+      "strength": 0.25,
+      "steps": 12,
+      "black_level_delta": -0.342,
+      "dr_delta": -0.185,
+      "dr_attenuation": "0.07%",
+      "status": "good"
+    },
+    "C2_strength030": {
+      "strength": 0.3,
+      "steps": 15,
+      "black_level_delta": 0.854,
+      "dr_delta": -2.153,
+      "dr_attenuation": "0.86%",
+      "status": "golden_sweet_spot"
+    },
+    "C3_strength035": {
+      "strength": 0.35,
+      "steps": 17,
+      "black_level_delta": 2.534,
+      "dr_delta": -3.648,
+      "dr_attenuation": "1.46%",
+      "status": "boundary_exceeded"
+    }
+  }
+}
