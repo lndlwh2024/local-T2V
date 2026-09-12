@@ -1,19 +1,19 @@
 ================================================================================
           Wan2.1 运行时诊断与实验配置报告 (Runtime Diagnostics & Config)
 ================================================================================
-实验目录: run_D1_5_B_strength040
+实验目录: run_D1_5_A_strength035
 分镜标识: shot_01
 时序锚定状态: 已关闭 (enable_temporal_anchoring=False)
 参考初始化模式: 全时序参考潜变量初始化 (use_full_sequence_reference=True, 实验 B3)
 
 【本轮关键执行与去噪指标】
 configured_num_inference_steps = 50
-strength = 0.40
-actual_iteration_count = 20
-len(actual_timesteps) = 20
-actual timesteps 前3个: [388.3673, 367.9796, 347.5919]
+strength = 0.35
+actual_iteration_count = 17
+len(actual_timesteps) = 17
+actual timesteps 前3个: [327.2041, 306.8163, 286.4286]
 actual timesteps 后3个: [41.7755, 21.3878, 1.0]
-Transformer 去噪耗时: 2042.42 s
+Transformer 去噪耗时: 1817.45 s
 峰值显存: 2951.24 MB
 
 【实验 B3 潜空间 3 个 temporal slice 统计与形状审计】
@@ -28,34 +28,34 @@ initial_latents_shape = [1, 16, 3, 60, 104]
   temporal_latent_2: mean=-0.0501, std=1.1179, min=-2.9863, max=2.7461
 
 --- initial_latents (加噪后) 切片统计 ---
-  temporal_latent_0: mean=-0.0065, std=0.5239, min=-2.041, max=2.2285
-  temporal_latent_1: mean=-0.0488, std=0.7196, min=-2.7988, max=2.8281
-  temporal_latent_2: mean=-0.0324, std=0.7871, min=-2.5156, max=2.9102
+  temporal_latent_0: mean=-0.0074, std=0.5062, min=-1.9111, max=2.1074
+  temporal_latent_1: mean=-0.0535, std=0.7426, min=-2.6562, max=2.6875
+  temporal_latent_2: mean=-0.0352, std=0.8211, min=-2.4141, max=2.8359
 
 --- denoised_latent (去噪后) 切片统计 ---
-  temporal_latent_0: mean=-0.0136, std=0.578, min=-1.9131, max=1.6846
-  temporal_latent_1: mean=-0.0783, std=0.9891, min=-3.166, max=2.4902
-  temporal_latent_2: mean=-0.0508, std=1.1221, min=-3.0469, max=2.8418
+  temporal_latent_0: mean=-0.014, std=0.5778, min=-1.8896, max=1.6787
+  temporal_latent_1: mean=-0.0787, std=0.9883, min=-3.2168, max=2.4629
+  temporal_latent_2: mean=-0.0501, std=1.1205, min=-3.041, max=2.8164
 
 【RGB 帧亮度统计与 Frame 1 -> Frame 7 漂移指标】
 A. 未替换原图的原始解码 Frame 0:
-   raw_frame_0_before_replace: mean=141.2048, std=55.9731, min=0.897, max=252.299, dynamic_range=251.402
+   raw_frame_0_before_replace: mean=141.253, std=55.8419, min=0.598, max=252.299, dynamic_range=251.701
 
 B. 逐帧统计 (Frame 0 ~ 7, Frame 0 已替换原图):
    Frame 0: mean=141.7769, std=54.728, min=0.0, max=251.288, dynamic_range=251.288
-   Frame 1: mean=140.4654, std=55.3525, min=3.375, max=251.0, dynamic_range=247.625
-   Frame 2: mean=140.3023, std=55.018, min=3.631, max=250.185, dynamic_range=246.554
-   Frame 3: mean=140.0937, std=54.8236, min=5.343, max=249.473, dynamic_range=244.13
-   Frame 4: mean=140.1832, std=54.6218, min=6.631, max=249.299, dynamic_range=242.668
-   Frame 5: mean=140.1282, std=54.6888, min=6.528, max=249.587, dynamic_range=243.059
-   Frame 6: mean=140.1353, std=54.6528, min=6.033, max=249.0, dynamic_range=242.967
-   Frame 7: mean=139.9937, std=54.6804, min=5.859, max=249.0, dynamic_range=243.141
+   Frame 1: mean=140.5958, std=55.2701, min=3.147, max=251.0, dynamic_range=247.853
+   Frame 2: mean=140.4486, std=54.9757, min=3.517, max=250.299, dynamic_range=246.782
+   Frame 3: mean=140.2639, std=54.8113, min=4.756, max=250.0, dynamic_range=245.244
+   Frame 4: mean=140.3569, std=54.6266, min=5.517, max=249.886, dynamic_range=244.369
+   Frame 5: mean=140.3479, std=54.7022, min=5.517, max=250.0, dynamic_range=244.483
+   Frame 6: mean=140.3836, std=54.6755, min=4.695, max=249.886, dynamic_range=245.191
+   Frame 7: mean=140.2753, std=54.7155, min=4.745, max=249.886, dynamic_range=245.141
 
 C. Frame 1 -> Frame 7 漂移物理指标:
-   black_level_delta    (min_luma_7 - min_luma_1)       = 2.484
-   highlight_delta      (max_luma_7 - max_luma_1)       = -2.0
-   std_delta            (std_luma_7 - std_luma_1)       = -0.6721
-   dynamic_range_delta  (range_7 - range_1)             = -4.484
+   black_level_delta    (min_luma_7 - min_luma_1)       = 1.598
+   highlight_delta      (max_luma_7 - max_luma_1)       = -1.114
+   std_delta            (std_luma_7 - std_luma_1)       = -0.5546
+   dynamic_range_delta  (range_7 - range_1)             = -2.712
 
 ================================================================================
 【核心诊断数据 14 项清单】
@@ -71,10 +71,10 @@ C. Frame 1 -> Frame 7 漂移物理指标:
    50
 
 4. 实际执行的 scheduler timestep 数量:
-   len(timesteps) = 20
+   len(timesteps) = 17
 
 5. 实际 timesteps 的前5个和后5个值:
-   - 前5个值: [388.3673, 367.9796, 347.5919, 327.2041, 306.8163]
+   - 前5个值: [327.2041, 306.8163, 286.4286, 266.0408, 245.6531]
    - 后5个值: [82.551, 62.1633, 41.7755, 21.3878, 1.0]
 
 6. sigmas 值 (如果存在):
@@ -85,7 +85,7 @@ C. Frame 1 -> Frame 7 漂移物理指标:
    2.0
 
 8. strength 实际值:
-   0.4
+   0.35
 
 9. VAE encode 被调用的总次数:
    1 次 (实验 B3 9帧全同视频一次性编码真实 z_ref_seq)
@@ -130,7 +130,7 @@ C. 输出链路说明:
 - 原始帧数: 9 帧 (最终导出精确截取前 8 帧)
 - 帧率: 8 fps
 - 步数: 50
-- Strength: 0.4
+- Strength: 0.35
 - CFG (guidance_scale): 2.0
 - 后处理: 【已彻底关闭】(跳过对比度恢复与垂直滤波，无逐帧归一化，仅输出 raw decode 帧)
 - 显存机制: CPU/GPU 内存解耦换入换出

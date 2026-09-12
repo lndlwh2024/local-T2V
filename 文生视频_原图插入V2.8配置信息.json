@@ -1,0 +1,39 @@
+{
+  "version": "V2.8",
+  "experiment_name": "run_D1_5_motion_audit",
+  "base_baseline": "avatar-c2-sweetspot-v1",
+  "task": "Stage D1.5: Action Responsiveness Audit & Full-Sequence Architecture Boundary Verdict",
+  "status": "COMPLETED_AND_VERDICT_FINALIZED",
+  "experiments": {
+    "D1": {
+      "strength": 0.3,
+      "actual_steps": 15,
+      "motion_mean_pixel_diff": 1.4736,
+      "black_level_delta": 1.299,
+      "dynamic_range_decay_percent": 1.05,
+      "head_turn_detected": false
+    },
+    "D1.5-A": {
+      "strength": 0.35,
+      "actual_steps": 17,
+      "motion_mean_pixel_diff": 1.5433,
+      "black_level_delta": 1.598,
+      "dynamic_range_decay_percent": 1.09,
+      "head_turn_detected": false
+    },
+    "D1.5-B": {
+      "strength": 0.4,
+      "actual_steps": 20,
+      "motion_mean_pixel_diff": 1.6516,
+      "black_level_delta": 2.484,
+      "dynamic_range_decay_percent": 1.81,
+      "head_turn_detected": false
+    }
+  },
+  "final_verdict": {
+    "architecture_classification": "INTRINSICALLY_SUITED_FOR_MICRO_MOTION_NOT_BIG_MOTION",
+    "root_cause": "ARCHITECTURE_BOUNDARY_NOT_MODEL_BUG",
+    "verdict_statement": "Full-Sequence static reference 架构天然适合微动作，不适合纯文本驱动的大动作；问题不属于模型 bug，而属于架构边界。",
+    "production_recommendation": "MAINTAIN_C2_STRENGTH_030_AS_PRODUCTION_SWEET_SPOT"
+  }
+}
