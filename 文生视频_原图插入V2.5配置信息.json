@@ -1,0 +1,112 @@
+{
+  "version": "2.5",
+  "experiment_name": "run_C1_strength025",
+  "branch": "exp-c1-strength025",
+  "base_tag": "B3_FULL_REFERENCE_GOLDEN_BASELINE",
+  "description": "文生视频数字人原图插入技术方案 V2.5 配置信息 (Strength 0.25 微动态提升与稳定性边界验证归档版)",
+  "status": "validated_success",
+  "evaluation_summary": {
+    "eye_micro_movement": "increased_and_natural",
+    "facial_micro_expression": "more_vivid_and_natural",
+    "head_respiration_movement": "slight_natural_fluctuation",
+    "wave_artifact": "completely_zero",
+    "grayscale_haze": "completely_absent",
+    "identity_consistency": "100_percent_consistent"
+  },
+  "parameters": {
+    "model_architecture": "Wan2.1-T2V-1.3B (Transformer FP16 + UMT5-XXL FP8 + 3D-VAE FP32)",
+    "resolution": {
+      "width": 832,
+      "height": 480
+    },
+    "raw_num_frames": 9,
+    "target_num_frames": 8,
+    "fps": 8,
+    "configured_num_inference_steps": 50,
+    "actual_iteration_count": 12,
+    "strength": 0.25,
+    "guidance_scale": 2.0,
+    "seed": 42,
+    "scheduler": "FlowMatchEulerDiscreteScheduler (shift=1.0)",
+    "use_full_sequence_reference": true,
+    "enable_temporal_anchoring": false,
+    "anchor_weights": {
+      "Slice 0 (Frame 0)": 0.0,
+      "Slice 1 (Frame 1~4)": 0.0,
+      "Slice 2 (Frame 5~8)": 0.0
+    },
+    "callback_in_denoise_loop": null,
+    "enable_post_processing": false
+  },
+  "photometric_measurements": {
+    "raw_frame_0_before_replace": {
+      "mean_luma": 141.4721,
+      "std_luma": 55.8049,
+      "min_luma": 0.598,
+      "max_luma": 252.299,
+      "dynamic_range": 251.701
+    },
+    "frame_0": {
+      "mean_luma": 141.7769,
+      "std_luma": 54.728,
+      "min_luma": 0.0,
+      "max_luma": 251.288,
+      "dynamic_range": 251.288
+    },
+    "frame_1": {
+      "mean_luma": 140.8509,
+      "std_luma": 55.2794,
+      "min_luma": 0.641,
+      "max_luma": 251.413,
+      "dynamic_range": 250.772
+    },
+    "frame_2": {
+      "mean_luma": 140.7117,
+      "std_luma": 55.0408,
+      "min_luma": 0.94,
+      "max_luma": 251.185,
+      "dynamic_range": 250.245
+    },
+    "frame_3": {
+      "mean_luma": 140.5559,
+      "std_luma": 54.9056,
+      "min_luma": 1.755,
+      "max_luma": 250.886,
+      "dynamic_range": 249.131
+    },
+    "frame_4": {
+      "mean_luma": 140.6581,
+      "std_luma": 54.7464,
+      "min_luma": 3.755,
+      "max_luma": 250.772,
+      "dynamic_range": 247.017
+    },
+    "frame_5": {
+      "mean_luma": 140.6134,
+      "std_luma": 54.7205,
+      "min_luma": 0.299,
+      "max_luma": 250.886,
+      "dynamic_range": 250.587
+    },
+    "frame_6": {
+      "mean_luma": 140.6427,
+      "std_luma": 54.6626,
+      "min_luma": 0.0,
+      "max_luma": 250.886,
+      "dynamic_range": 250.886
+    },
+    "frame_7": {
+      "mean_luma": 140.5142,
+      "std_luma": 54.6786,
+      "min_luma": 0.299,
+      "max_luma": 250.886,
+      "dynamic_range": 250.587
+    }
+  },
+  "deltas_frame1_to_frame7": {
+    "black_level_delta": -0.342,
+    "highlight_delta": -0.527,
+    "std_delta": -0.6008,
+    "dynamic_range_delta": -0.185
+  }
+}

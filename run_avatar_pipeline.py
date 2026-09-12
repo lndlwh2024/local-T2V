@@ -312,6 +312,27 @@ def main():
                 strip_canvas.save(str(strip_out_path))
                 logger.info(f"  8帧面部连续演化条带已生成: {strip_out_path.name}")
 
+                # 3.1 生成 Frame 1 vs Frame 7 面部微距特写对比图 (f1_vs_f7_face_compare.png)
+                if len(face_crops) >= 8:
+                    f1_face = face_crops[1]
+                    f7_face = face_crops[7]
+                    cw_cmp, ch_cmp = f1_face.size
+                    banner_cmp_h = 32
+                    f17_canvas = Image.new("RGB", (cw_cmp * 2, ch_cmp + banner_cmp_h), color=(20, 20, 20))
+                    draw_cmp = ImageDraw.Draw(f17_canvas)
+
+                    # 绘制标题栏
+                    draw_cmp.rectangle([0, 0, cw_cmp, banner_cmp_h], fill=(36, 36, 36))
+                    draw_cmp.text((16, 8), "Frame 1 (Early Denoised Face)", fill=(240, 240, 240))
+                    draw_cmp.rectangle([cw_cmp, 0, cw_cmp * 2, banner_cmp_h], fill=(28, 28, 28))
+                    draw_cmp.text((cw_cmp + 16, 8), "Frame 7 (Final Evolved Face)", fill=(240, 240, 240))
+
+                    f17_canvas.paste(f1_face, (0, banner_cmp_h))
+                    f17_canvas.paste(f7_face, (cw_cmp, banner_cmp_h))
+                    f17_path = exp_dir / "f1_vs_f7_face_compare.png"
+                    f17_canvas.save(str(f17_path))
+                    logger.info(f"  Frame 1 vs Frame 7 面部特写对比图已生成: {f17_path.name}")
+
                 # 4. 导出 run_config.txt (包含 14 项完整诊断数据与配置)
                 diag = shot_res.get("diagnostics", audit.get("diagnostics", {}))
                 luma_stats = diag.get("frames_luma_stats", {})
