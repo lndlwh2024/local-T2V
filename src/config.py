@@ -39,30 +39,38 @@ class VideoGenerationConfig:
     # 目标裁切帧数：当设定时，底层按 num_frames (4n+1) 生成，导出时自动精确截断为 target_num_frames
     target_num_frames: Optional[int] = None
     fps: int = 8
-    num_inference_steps: int = 20
-    # 引导强度设为 3.2，消除高 CFG (5.0) 引起的边缘吉布斯振铃、双重发际线重影与高频干涉
-    guidance_scale: float = 3.2
+    num_inference_steps: int = 50
+    # 引导强度设为 2.0，专用于引导眨眼与呼吸等微表情，杜绝高 CFG (5.0) 的通用文本先验对抗原图五官骨相
+    guidance_scale: float = 2.0
     seed: Optional[int] = 42
     # 物理显存安全警戒线：4096MB 显存需扣除系统合成器及驱动保留的 ~400MB，故硬锁定在 3.6GB
     vram_limit_gb: float = 3.6
     output_filename: Optional[str] = None
     # 首帧参考图像路径：当指定时，流水线启动时序首帧潜空间条件锚定（I2V驱动模式）
     first_frame_path: Optional[str] = None
-    # I2V 动作变化自由度强度（0.1~1.0，微表情推荐 0.18~0.25）：
-    # 控制对首帧骨相与环境先验的保留程度；0.20 可严格锁定 80% 原图五官骨相与双眼皮儒雅神采，
-    # 彻底杜绝文本先验覆盖导致的变脸走样，同时提供恰到好处的眨眼与呼吸微动作
-    strength: float = 0.20
+    # ==============================================================================
+    # 生产模式定义 (Production Mode: AVATAR_STABLE_MICRO_MOTION)
+    # Production Sweet Spot: strength = 0.30
+    # 用途：
+    #   - 固定数字人、固定服装、固定背景
+    #   - 口播、眨眼、自然呼吸、轻微头部动作、轻微自然表情
+    # 边界限制：
+    #   - 不声明适用于大幅转身、大幅身体运动、换衣服、大范围场景变化 (留待阶段 D 独立压力测试)
+    # 设计理由：
+    #   经阶段 C 严格梯度验证 (B3:0.20 -> C1:0.25 -> C2:0.30 -> C3:0.35)，
+    #   strength = 0.30 在 15 步流匹配去噪下实现眼神与嘴角微表情自然生动，
+    #   且动态范围衰减仅 0.86%，黑位仅微浮 0.85，100% 保持零波纹、零双影与骨相高保真。
+    # ==============================================================================
+    strength: float = 0.30
     # 全时序潜空间渐进软锚定开关 (Progressive Temporal Identity Anchoring)
-    # 控制是否对 Slice 1 (第1~4帧) 与 Slice 2 (第5~8帧) 实施骨相强阻尼约束；
-    # 实验 A1 中将其设为 False (anchor_weight = 0)，单独检验软锚定对波纹和重影的影响
-    enable_temporal_anchoring: bool = True
+    # 生产模式锁定为 False (anchor_weight = 0)，彻底根除软锚定导致的横向水波纹与双重发际线重影
+    enable_temporal_anchoring: bool = False
     # 视频后处理管线开关 (Post-Processing Pipeline)
-    # 控制是否启用时序动态范围恢复 (Temporal Contrast Restoration) 与自适应保边去条纹滤波 (Adaptive De-Stripe Filter)；
-    # 实验 B1 中将其设为 False，彻底旁路所有后处理与逐帧重映射，仅导出固定线性映射的原始解码帧 (Raw Decoded Frames)
-    enable_post_processing: bool = True
+    # 生产模式锁定为 False，彻底旁路所有后处理与逐帧重映射，输出原生高保真解码帧 (Raw Decoded Frames)，避免拉伸放大噪点
+    enable_post_processing: bool = False
     # 全时序参考潜变量初始化开关 (Full-Sequence Reference Latent Initialization)
-    # 控制是将首帧构造为 9 帧全同视频由 3D Causal VAE 一次性编码得到真实全时序参考潜变量 z_ref_seq (T=3)，
-    # 还是仅编码单帧并广播复制；实验 B3 启用该项以从根源修复时序动态范围衰减
+    # 生产模式锁定为 True，9 帧全同静态参考视频由 FP32 3D Causal VAE 一次性编码真实 T=3 潜变量母本，
+    # 从根源彻底攻克时序发灰、泛白与动态范围萎缩
     use_full_sequence_reference: bool = True
 
     def validate(self) -> None:

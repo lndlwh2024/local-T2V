@@ -79,16 +79,16 @@ def build_shot_item(
     seed: int = 42,
     filename_prefix: str = "",
     first_frame_path: str = None,
-    strength: float = 0.20,
-    enable_temporal_anchoring: bool = True,
-    enable_post_processing: bool = True,
+    strength: float = 0.30,
+    enable_temporal_anchoring: bool = False,
+    enable_post_processing: bool = False,
     use_full_sequence_reference: bool = True
 ) -> dict:
     """
     构造标准分镜头数据包
     设计原因：
-    底层锁定 9 帧 (4n+1，n=2)，支持全时序潜变量一次性因果编码 (use_full_sequence_reference)；
-    配合 FP32 VAE 解码、可选后处理滤波，截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
+    底层锁定 9 帧 (4n+1，n=2)，采用生产黄金甜点 (strength=0.30) 与全时序因果编码 (use_full_sequence_reference)；
+    配合全精度 FP32 VAE 解码与零后处理原生输出，截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
     """
     shot_id = shot_info["id"]
     full_prompt = f"{AVATAR_BASE_PROMPT} Action: {shot_info['action']}"
@@ -111,33 +111,33 @@ def build_shot_item(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="数字人 5 秒时序卡点视频生成流水线")
+    parser = argparse.ArgumentParser(description="数字人 5 秒时序卡点视频生成流水线 (生产模式: AVATAR_STABLE_MICRO_MOTION)")
     parser.add_argument("--shot", choices=["all", "shot_01", "shot_02", "shot_03", "shot_04", "shot_05"], default="all", help="指定渲染的分镜镜头（默认全部）")
     parser.add_argument("--width", type=int, default=832, help="视频宽度（默认 832 官方原生480P）")
     parser.add_argument("--height", type=int, default=480, help="视频高度（默认 480 官方原生480P）")
-    parser.add_argument("--steps", type=int, default=20, help="去噪采样步数（20~28 步，默认 20）")
-    parser.add_argument("--strength", type=float, default=0.20, help="首帧结构先验去噪强度（微表情推荐 0.18~0.25，默认 0.20）")
+    parser.add_argument("--steps", type=int, default=50, help="去噪采样步数（生产模式锁定 50 步，默认 50）")
+    parser.add_argument("--strength", type=float, default=0.30, help="生产黄金甜点去噪强度 (Production Sweet Spot: 默认 0.30)")
     parser.add_argument("--seed", type=int, default=42, help="随机数种子（固定人物面貌一致性）")
     parser.add_argument("--prefix", type=str, default="", help="分镜输出文件名前缀（如 fixed_）")
     parser.add_argument("--force", action="store_true", help="强制重新渲染，不复用已有分镜缓存")
     parser.add_argument("--first-frame", type=str, default="media/数字人大图正面.png", help="首帧参考数字人图像路径（默认 media/数字人大图正面.png）")
     parser.add_argument("--output", type=str, default="avatar_speech_5s.mp4", help="最终成品视频文件名")
-    parser.add_argument("--no-temporal-anchor", action="store_true", help="关闭 Progressive Temporal Identity Anchoring (实验 A1)")
-    parser.add_argument("--no-post-process", action="store_true", help="关闭后处理与逐帧自动归一化，仅输出原始解码结果 (实验 B1)")
+    parser.add_argument("--no-temporal-anchor", action="store_true", help="关闭 Progressive Temporal Identity Anchoring (生产模式默认已关闭)")
+    parser.add_argument("--no-post-process", action="store_true", help="关闭后处理与逐帧自动归一化，仅输出原始解码结果 (生产模式默认已关闭)")
     parser.add_argument("--no-full-sequence-reference", action="store_true", help="关闭全时序参考潜变量初始化，退回旧版单帧广播模式")
-    parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_B3_full_sequence_reference）")
+    parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_C2_strength030）")
     args = parser.parse_args()
 
-    enable_anchor = not args.no_temporal_anchor
-    enable_post = not args.no_post_process
+    enable_anchor = not args.no_temporal_anchor if args.no_temporal_anchor else False
+    enable_post = not args.no_post_process if args.no_post_process else False
     use_full_seq = not args.no_full_sequence_reference
 
     logger.info("==================================================================")
-    logger.info("  🚀 数字人时序卡点视频流水线 (Wan2.1 原生 832x480 电影级引擎)")
-    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength}")
-    logger.info(f"  潜空间时序锚定: {'【已关闭】(实验 A1: Frame 1~8 anchor_weight = 0)' if not enable_anchor else '【开启】(渐进软锚定 85%/80%)'}")
-    logger.info(f"  参考潜变量模式: {'【全时序参考初始化 (实验 B3)】(9帧全同张量 VAE 一次性编码真实 z_ref_seq T=3)' if use_full_seq else '【单帧广播模式】(旧版单帧重复 3 次)'}")
-    logger.info(f"  后处理管线: {'【已彻底关闭】(实验 B1: 跳过对比度校准与垂直滤波，禁止逐帧归一化，仅输出 raw decode 帧)' if not enable_post else '【开启】(时序动态对比度校准 + 自适应垂直保边滤波)'}")
+    logger.info("  🚀 数字人时序卡点视频流水线 (生产模式: AVATAR_STABLE_MICRO_MOTION)")
+    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength} (生产黄金甜点)")
+    logger.info(f"  潜空间时序锚定: {'【已关闭】(Frame 1~8 anchor_weight = 0，零波纹)' if not enable_anchor else '【开启】(渐进软锚定 85%/80%)'}")
+    logger.info(f"  参考潜变量模式: {'【全时序参考初始化 (实验 B3 架构)】(9帧全同张量 VAE 一次性编码真实 z_ref_seq T=3)' if use_full_seq else '【单帧广播模式】(旧版单帧重复 3 次)'}")
+    logger.info(f"  后处理管线: {'【已彻底关闭】(零后处理原生解码帧 Raw Decoded Frames，零发雾)' if not enable_post else '【开启】(时序动态对比度校准 + 自适应垂直保边滤波)'}")
     if args.first_frame:
         logger.info(f"  首帧定义: {args.first_frame} (I2V 条件注入模式)")
     logger.info("==================================================================")
