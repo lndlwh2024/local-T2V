@@ -1,0 +1,43 @@
+{
+  "version": "V2.9",
+  "experiment_name": "run_D2_control_pure_t2v_big_motion",
+  "base_baseline": "avatar-c2-sweetspot-v1",
+  "task": "Stage D2-Control: Pure T2V Motion Response Control Experiment & Root Cause Verdict",
+  "status": "COMPLETED_AND_VERDICT_FINALIZED",
+  "controls": {
+    "use_full_sequence_reference": false,
+    "initial_latents_source": "RANDOM_NOISE",
+    "first_frame_path": null,
+    "enable_temporal_anchoring": false,
+    "enable_post_processing": false,
+    "frame_0_replaced": false
+  },
+  "hyperparameters": {
+    "num_inference_steps": 50,
+    "actual_iteration_count": 50,
+    "guidance_scale": 2.0,
+    "scheduler": "FlowMatchEulerDiscreteScheduler",
+    "shift": 1.0,
+    "seed": 42
+  },
+  "runtime_metrics": {
+    "transformer_denoise_seconds": 5026.22,
+    "peak_vram_mb": 2951.79,
+    "prompt_embedding_hash": "388545186af5c62b4186acf56639bf9e85df93a1433ec3d1667a2e9039895e5f"
+  },
+  "photometric_and_motion_metrics": {
+    "mean_pixel_diff_f1_vs_f7": 16.4894,
+    "max_pixel_diff_f1_vs_f7": 120.0,
+    "head_turn_angle_observed": "APPROX_45_TO_60_DEGREES_SIDE_VIEW",
+    "frame_1_black_level": 25.641,
+    "frame_7_black_level": 41.407,
+    "black_level_delta": 15.766,
+    "dynamic_range_decay_percent": 21.2
+  },
+  "final_verdict": {
+    "branch": "BRANCH_A_CONFIRMED",
+    "root_cause": "Full-Sequence Static Reference 是大动作被锁死的根本原因",
+    "production_mode_limitation": "C2/B3 永久限定为 AVATAR_STABLE_MICRO_MOTION",
+    "big_motion_requirement": "大动作生产必须使用另一条 T2V / 动作驱动架构"
+  }
+}

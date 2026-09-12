@@ -136,6 +136,7 @@ def main():
     parser.add_argument("--no-temporal-anchor", action="store_true", help="关闭 Progressive Temporal Identity Anchoring (生产模式默认已关闭)")
     parser.add_argument("--no-post-process", action="store_true", help="关闭后处理与逐帧自动归一化，仅输出原始解码结果 (生产模式默认已关闭)")
     parser.add_argument("--no-full-sequence-reference", action="store_true", help="关闭全时序参考潜变量初始化，退回旧版单帧广播模式")
+    parser.add_argument("--pure-t2v", action="store_true", help="启用实验 D2-Control 纯 T2V 随机高斯噪声对照模式 (关闭全部参考潜变量与原图)")
     parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_C2_strength030）")
     args = parser.parse_args()
 
@@ -143,11 +144,24 @@ def main():
     enable_post = not args.no_post_process if args.no_post_process else False
     use_full_seq = not args.no_full_sequence_reference
 
+    if args.pure_t2v:
+        args.first_frame = None
+        use_full_seq = False
+        enable_anchor = False
+
     logger.info("==================================================================")
-    logger.info("  🚀 数字人时序卡点视频流水线 (生产模式: AVATAR_STABLE_MICRO_MOTION)")
-    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength} (生产黄金甜点)")
+    if args.pure_t2v:
+        logger.info("  🧪 数字人对照实验: 【实验 D2-Control 纯 T2V 大动作响应对照】")
+        logger.info("  use_full_sequence_reference = False")
+        logger.info("  initial_latents_source = RANDOM_NOISE")
+        logger.info(f"  actual prompt = {args.prompt}")
+        logger.info(f"  actual_iteration_count = {args.steps}")
+        logger.info("  CFG = 2.0")
+    else:
+        logger.info("  🚀 数字人时序卡点视频流水线 (生产模式: AVATAR_STABLE_MICRO_MOTION)")
+    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength}")
     logger.info(f"  潜空间时序锚定: {'【已关闭】(Frame 1~8 anchor_weight = 0，零波纹)' if not enable_anchor else '【开启】(渐进软锚定 85%/80%)'}")
-    logger.info(f"  参考潜变量模式: {'【全时序参考初始化 (实验 B3 架构)】(9帧全同张量 VAE 一次性编码真实 z_ref_seq T=3)' if use_full_seq else '【单帧广播模式】(旧版单帧重复 3 次)'}")
+    logger.info(f"  参考潜变量模式: {'【纯 T2V 随机噪声初始化】(零参考图)' if args.pure_t2v else ('【全时序参考初始化 (实验 B3 架构)】(9帧全同张量 VAE 一次性编码真实 z_ref_seq T=3)' if use_full_seq else '【单帧广播模式】(旧版单帧重复 3 次)')}")
     logger.info(f"  后处理管线: {'【已彻底关闭】(零后处理原生解码帧 Raw Decoded Frames，零发雾)' if not enable_post else '【开启】(时序动态对比度校准 + 自适应垂直保边滤波)'}")
     if args.first_frame:
         logger.info(f"  首帧定义: {args.first_frame} (I2V 条件注入模式)")
@@ -303,7 +317,9 @@ def main():
                     x = col * w
                     y = row * (h + banner_h)
 
-                    if idx == 0:
+                    if args.pure_t2v:
+                        label = f"Frame {idx} (Pure T2V | Random Noise)"
+                    elif idx == 0:
                         label = "Frame 0 (Replaced with Reference Image)"
                     else:
                         anchor_tag = "Anchor: 0%" if not enable_anchor else ("Anchor: 85%" if idx <= 4 else "Anchor: 80%")
@@ -359,7 +375,13 @@ def main():
                     f"实验目录: {exp_dir.name}",
                     f"分镜标识: {shot_res.get('id', 'shot_01')}",
                     f"时序锚定状态: {'已关闭 (enable_temporal_anchoring=False)' if not enable_anchor else '已开启'}",
-                    f"参考初始化模式: {'全时序参考潜变量初始化 (use_full_sequence_reference=True, 实验 B3)' if use_full_seq else '单帧广播初始化 (use_full_sequence_reference=False)'}",
+                    f"参考初始化模式: {'纯T2V随机高斯噪声初始化 (use_full_sequence_reference=False, initial_latents_source=RANDOM_NOISE)' if args.pure_t2v else ('全时序参考潜变量初始化 (use_full_sequence_reference=True, 实验 B3)' if use_full_seq else '单帧广播初始化 (use_full_sequence_reference=False)')}",
+                    f"use_full_sequence_reference = {diag.get('use_full_sequence_reference', False if args.pure_t2v else True)}",
+                    f"initial_latents_source = {diag.get('initial_latents_source', 'RANDOM_NOISE' if args.pure_t2v else 'FULL_SEQUENCE_REFERENCE')}",
+                    f"actual prompt = {diag.get('actual_prompt', args.prompt)}",
+                    f"prompt embedding checksum/hash = {diag.get('prompt_embedding_hash', 'N/A')}",
+                    f"actual_iteration_count = {diag.get('actual_iteration_count', args.steps)}",
+                    f"CFG = {diag.get('guidance_scale', 2.0)}",
                     "",
                     "【本轮关键执行与去噪指标】",
                     f"configured_num_inference_steps = {args.steps}",
@@ -509,30 +531,42 @@ def main():
                 logger.info("  run_debug.txt 已同步保存至工作区根目录！")
 
                 # 按照用户要求在控制台直接打印关键去噪执行指标与实验 B3 诊断指标
+                # 按照用户要求在控制台直接打印关键去噪执行指标与实验 B3 / D2-Control 诊断指标
                 logger.info("==================================================================")
-                logger.info("  【实验 B3 关键诊断指标控制台汇总】")
-                logger.info(f"  1. 参考潜变量模式: use_full_sequence_reference = {use_full_seq}")
-                logger.info(f"     old_ref_shape: {ref_shapes.get('old_ref_latent_shape')} -> new_ref_shape: {ref_shapes.get('new_ref_latent_shape')}")
-                logger.info(f"  2. 后处理状态:     enable_post_processing = {enable_post}")
-                logger.info(f"  3. Frame 1 -> Frame 7 漂移物理指标:")
-                logger.info(f"     - black_level_delta:   {deltas.get('black_level_delta', 'N/A')}")
-                logger.info(f"     - highlight_delta:     {deltas.get('highlight_delta', 'N/A')}")
-                logger.info(f"     - std_delta:           {deltas.get('std_delta', 'N/A')}")
-                logger.info(f"     - dynamic_range_delta: {deltas.get('dynamic_range_delta', 'N/A')}")
-                logger.info("  4. 帧亮度统计:")
-                logger.info(f"     raw_frame_0: mean={raw_f0_stat.get('mean_luma')}, min={raw_f0_stat.get('min_luma')}, max={raw_f0_stat.get('max_luma')}, range={raw_f0_stat.get('dynamic_range')}")
-                for f_i in range(1, 8):
-                    st = luma_stats.get(f"frame_{f_i}", {})
-                    logger.info(f"     Frame {f_i}:     mean={st.get('mean_luma')}, min={st.get('min_luma')}, max={st.get('max_luma')}, range={st.get('dynamic_range')}")
-                logger.info("------------------------------------------------------------------")
-                logger.info(f"  configured_num_inference_steps = {args.steps}")
-                logger.info(f"  strength = {args.strength:.2f}")
-                logger.info(f"  actual_iteration_count = {diag.get('actual_iteration_count', diag.get('actual_timesteps_len'))}")
-                logger.info(f"  len(actual_timesteps) = {diag.get('actual_timesteps_len')}")
-                logger.info(f"  actual timesteps 前3个: {diag.get('actual_timesteps_head3')}")
-                logger.info(f"  actual timesteps 后3个: {diag.get('actual_timesteps_tail3')}")
-                logger.info(f"  Transformer 去噪耗时: {diag.get('transformer_denoise_elapsed_sec')} s")
-                logger.info(f"  峰值显存: {audit['gpu_peak_vram_mb']} MB")
+                if args.pure_t2v:
+                    logger.info("  【实验 D2-Control 纯 T2V 对照关键指标控制台汇总】")
+                    logger.info("  use_full_sequence_reference = False")
+                    logger.info("  initial_latents_source = RANDOM_NOISE")
+                    logger.info(f"  actual prompt = {diag.get('actual_prompt', args.prompt)}")
+                    logger.info(f"  prompt embedding checksum/hash = {diag.get('prompt_embedding_hash', 'N/A')}")
+                    logger.info(f"  actual_iteration_count = {diag.get('actual_iteration_count', args.steps)}")
+                    logger.info(f"  CFG = {diag.get('guidance_scale', 2.0)}")
+                    logger.info(f"  Transformer 去噪耗时: {diag.get('transformer_denoise_elapsed_sec')} s")
+                    logger.info(f"  峰值显存: {audit['gpu_peak_vram_mb']} MB")
+                else:
+                    logger.info("  【实验 B3 关键诊断指标控制台汇总】")
+                    logger.info(f"  1. 参考潜变量模式: use_full_sequence_reference = {use_full_seq}")
+                    logger.info(f"     old_ref_shape: {ref_shapes.get('old_ref_latent_shape')} -> new_ref_shape: {ref_shapes.get('new_ref_latent_shape')}")
+                    logger.info(f"  2. 后处理状态:     enable_post_processing = {enable_post}")
+                    logger.info(f"  3. Frame 1 -> Frame 7 漂移物理指标:")
+                    logger.info(f"     - black_level_delta:   {deltas.get('black_level_delta', 'N/A')}")
+                    logger.info(f"     - highlight_delta:     {deltas.get('highlight_delta', 'N/A')}")
+                    logger.info(f"     - std_delta:           {deltas.get('std_delta', 'N/A')}")
+                    logger.info(f"     - dynamic_range_delta: {deltas.get('dynamic_range_delta', 'N/A')}")
+                    logger.info("  4. 帧亮度统计:")
+                    logger.info(f"     raw_frame_0: mean={raw_f0_stat.get('mean_luma')}, min={raw_f0_stat.get('min_luma')}, max={raw_f0_stat.get('max_luma')}, range={raw_f0_stat.get('dynamic_range')}")
+                    for f_i in range(1, 8):
+                        st = luma_stats.get(f"frame_{f_i}", {})
+                        logger.info(f"     Frame {f_i}:     mean={st.get('mean_luma')}, min={st.get('min_luma')}, max={st.get('max_luma')}, range={st.get('dynamic_range')}")
+                    logger.info("------------------------------------------------------------------")
+                    logger.info(f"  configured_num_inference_steps = {args.steps}")
+                    logger.info(f"  strength = {args.strength:.2f}")
+                    logger.info(f"  actual_iteration_count = {diag.get('actual_iteration_count', diag.get('actual_timesteps_len'))}")
+                    logger.info(f"  len(actual_timesteps) = {diag.get('actual_timesteps_len')}")
+                    logger.info(f"  actual timesteps 前3个: {diag.get('actual_timesteps_head3')}")
+                    logger.info(f"  actual timesteps 后3个: {diag.get('actual_timesteps_tail3')}")
+                    logger.info(f"  Transformer 去噪耗时: {diag.get('transformer_denoise_elapsed_sec')} s")
+                    logger.info(f"  峰值显存: {audit['gpu_peak_vram_mb']} MB")
                 logger.info("==================================================================")
         except Exception as e:
             logger.warning(f"生成微距检验图或实验归档时遇到非致命异常: {e}", exc_info=True)

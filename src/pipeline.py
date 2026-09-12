@@ -531,9 +531,15 @@ class WanT2VLowVramPipeline:
                         negative_prompt=neg_text,
                         target_device=self.device
                     )
+                    import hashlib
+                    p_bytes = p_emb.detach().cpu().numpy().tobytes()
+                    p_hash = hashlib.sha256(p_bytes).hexdigest()
                     embeddings_cache[shot_id] = {
                         "prompt_embeds": p_emb,
-                        "negative_prompt_embeds": n_emb
+                        "negative_prompt_embeds": n_emb,
+                        "prompt_text": prompt_text,
+                        "negative_prompt_text": neg_text,
+                        "prompt_embedding_hash": p_hash
                     }
                 logger.info(f"已完成 {len(pending_shots)} 个待渲染分镜的文本特征编码！")
 
@@ -773,7 +779,10 @@ class WanT2VLowVramPipeline:
                         "sigmas_tail5": [round(float(x), 4) for x in scheduler_sigmas[-5:]] if scheduler_sigmas else None,
                         "guidance_scale": float(self.config.guidance_scale),
                         "strength": float(strength),
-                        "use_full_sequence_reference": use_full_seq,
+                        "use_full_sequence_reference": use_full_seq if is_any_i2v else False,
+                        "initial_latents_source": "FULL_SEQUENCE_REFERENCE" if (is_any_i2v and use_full_seq) else ("SINGLE_FRAME_BROADCAST" if is_any_i2v else "RANDOM_NOISE"),
+                        "actual_prompt": shot_embeds.get("prompt_text", ""),
+                        "prompt_embedding_hash": shot_embeds.get("prompt_embedding_hash", ""),
                         "ref_shapes_info": ref_shapes_info,
                         "latent_evolution_stats": latent_evolution_stats,
                         "temporal_slices": {
