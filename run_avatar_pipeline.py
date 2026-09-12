@@ -136,7 +136,8 @@ def main():
     parser.add_argument("--no-temporal-anchor", action="store_true", help="关闭 Progressive Temporal Identity Anchoring (生产模式默认已关闭)")
     parser.add_argument("--no-post-process", action="store_true", help="关闭后处理与逐帧自动归一化，仅输出原始解码结果 (生产模式默认已关闭)")
     parser.add_argument("--no-full-sequence-reference", action="store_true", help="关闭全时序参考潜变量初始化，退回旧版单帧广播模式")
-    parser.add_argument("--pure-t2v", action="store_true", help="启用实验 D2-Control 纯 T2V 随机高斯噪声对照模式 (关闭全部参考潜变量与原图)")
+    parser.add_argument("--pure-t2v", action="store_true", help="启用实验 D2-Control / D2.1 纯 T2V 随机高斯噪声对照模式 (关闭全部参考潜变量与原图)")
+    parser.add_argument("--cfg", type=float, default=2.0, help="Classifier-Free Guidance 文本引导权重 (默认 2.0，实验 D2.1 提升为 6.0)")
     parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_C2_strength030）")
     args = parser.parse_args()
 
@@ -151,15 +152,15 @@ def main():
 
     logger.info("==================================================================")
     if args.pure_t2v:
-        logger.info("  🧪 数字人对照实验: 【实验 D2-Control 纯 T2V 大动作响应对照】")
+        logger.info(f"  🧪 数字人对照实验: 【纯 T2V 大动作响应对照实验】(CFG: {args.cfg})")
         logger.info("  use_full_sequence_reference = False")
         logger.info("  initial_latents_source = RANDOM_NOISE")
         logger.info(f"  actual prompt = {args.prompt}")
         logger.info(f"  actual_iteration_count = {args.steps}")
-        logger.info("  CFG = 2.0")
+        logger.info(f"  CFG = {args.cfg}")
     else:
         logger.info("  🚀 数字人时序卡点视频流水线 (生产模式: AVATAR_STABLE_MICRO_MOTION)")
-    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength}")
+    logger.info(f"  分辨率: {args.width}x{args.height} | 帧率: 8 fps | 目标: {args.shot} | 步数: {args.steps} | 强度: {args.strength} | CFG: {args.cfg}")
     logger.info(f"  潜空间时序锚定: {'【已关闭】(Frame 1~8 anchor_weight = 0，零波纹)' if not enable_anchor else '【开启】(渐进软锚定 85%/80%)'}")
     logger.info(f"  参考潜变量模式: {'【纯 T2V 随机噪声初始化】(零参考图)' if args.pure_t2v else ('【全时序参考初始化 (实验 B3 架构)】(9帧全同张量 VAE 一次性编码真实 z_ref_seq T=3)' if use_full_seq else '【单帧广播模式】(旧版单帧重复 3 次)')}")
     logger.info(f"  后处理管线: {'【已彻底关闭】(零后处理原生解码帧 Raw Decoded Frames，零发雾)' if not enable_post else '【开启】(时序动态对比度校准 + 自适应垂直保边滤波)'}")
@@ -184,7 +185,7 @@ def main():
         target_num_frames=8,
         fps=8,
         num_inference_steps=args.steps,
-        guidance_scale=2.0,
+        guidance_scale=args.cfg,
         seed=args.seed,
         vram_limit_gb=3.6
     )
@@ -368,6 +369,12 @@ def main():
                 ref_shapes = diag.get("ref_shapes_info", {})
                 deltas = luma_stats.get("frame1_to_frame7_deltas", {})
 
+                import hashlib
+                c2_base_str = f"{AVATAR_BASE_PROMPT} Action: {SHOTS_CONFIG[0]['action']}"
+                c2_hash_val = hashlib.sha256(c2_base_str.encode("utf-8")).hexdigest()
+                act_prompt_str = diag.get("actual_prompt", args.prompt or "")
+                cur_prompt_hash = hashlib.sha256(act_prompt_str.encode("utf-8")).hexdigest()
+
                 diag_lines = [
                     "=" * 80,
                     "          Wan2.1 运行时诊断与实验配置报告 (Runtime Diagnostics & Config)",
@@ -378,10 +385,13 @@ def main():
                     f"参考初始化模式: {'纯T2V随机高斯噪声初始化 (use_full_sequence_reference=False, initial_latents_source=RANDOM_NOISE)' if args.pure_t2v else ('全时序参考潜变量初始化 (use_full_sequence_reference=True, 实验 B3)' if use_full_seq else '单帧广播初始化 (use_full_sequence_reference=False)')}",
                     f"use_full_sequence_reference = {diag.get('use_full_sequence_reference', False if args.pure_t2v else True)}",
                     f"initial_latents_source = {diag.get('initial_latents_source', 'RANDOM_NOISE' if args.pure_t2v else 'FULL_SEQUENCE_REFERENCE')}",
-                    f"actual prompt = {diag.get('actual_prompt', args.prompt)}",
-                    f"prompt embedding checksum/hash = {diag.get('prompt_embedding_hash', 'N/A')}",
+                    f"actual prompt = {act_prompt_str}",
+                    f"prompt_hash = {cur_prompt_hash}",
+                    f"text_embedding_checksum = {diag.get('prompt_embedding_hash', 'N/A')}",
+                    f"c2_reference_prompt_hash = {c2_hash_val}",
+                    f"is_prompt_different_from_c2 = {cur_prompt_hash != c2_hash_val}",
                     f"actual_iteration_count = {diag.get('actual_iteration_count', args.steps)}",
-                    f"CFG = {diag.get('guidance_scale', 2.0)}",
+                    f"guidance_scale (CFG) = {diag.get('guidance_scale', args.cfg)}",
                     "",
                     "【本轮关键执行与去噪指标】",
                     f"configured_num_inference_steps = {args.steps}",
@@ -534,13 +544,15 @@ def main():
                 # 按照用户要求在控制台直接打印关键去噪执行指标与实验 B3 / D2-Control 诊断指标
                 logger.info("==================================================================")
                 if args.pure_t2v:
-                    logger.info("  【实验 D2-Control 纯 T2V 对照关键指标控制台汇总】")
+                    logger.info(f"  【实验 D2.1 纯 T2V 对照关键指标控制台汇总 (CFG={args.cfg})】")
                     logger.info("  use_full_sequence_reference = False")
                     logger.info("  initial_latents_source = RANDOM_NOISE")
-                    logger.info(f"  actual prompt = {diag.get('actual_prompt', args.prompt)}")
-                    logger.info(f"  prompt embedding checksum/hash = {diag.get('prompt_embedding_hash', 'N/A')}")
+                    logger.info(f"  actual prompt = {act_prompt_str}")
+                    logger.info(f"  prompt_hash = {cur_prompt_hash}")
+                    logger.info(f"  text_embedding_checksum = {diag.get('prompt_embedding_hash', 'N/A')}")
+                    logger.info(f"  c2_reference_prompt_hash = {c2_hash_val} (Different: {cur_prompt_hash != c2_hash_val})")
                     logger.info(f"  actual_iteration_count = {diag.get('actual_iteration_count', args.steps)}")
-                    logger.info(f"  CFG = {diag.get('guidance_scale', 2.0)}")
+                    logger.info(f"  CFG (guidance_scale) = {diag.get('guidance_scale', args.cfg)}")
                     logger.info(f"  Transformer 去噪耗时: {diag.get('transformer_denoise_elapsed_sec')} s")
                     logger.info(f"  峰值显存: {audit['gpu_peak_vram_mb']} MB")
                 else:

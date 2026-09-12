@@ -1,0 +1,50 @@
+{
+  "version": "V2.10",
+  "experiment_name": "run_D2_1_pure_t2v_cfg6",
+  "base_baseline": "avatar-c2-sweetspot-v1",
+  "task": "Stage D2.1: Pure T2V Higher CFG Motion Response Verification & Verdict B",
+  "status": "COMPLETED_AND_VERDICT_FINALIZED",
+  "controls": {
+    "use_full_sequence_reference": false,
+    "initial_latents_source": "RANDOM_NOISE",
+    "first_frame_path": null,
+    "enable_temporal_anchoring": false,
+    "enable_post_processing": false,
+    "frame_0_replaced": false
+  },
+  "hyperparameters": {
+    "num_inference_steps": 50,
+    "actual_iteration_count": 50,
+    "guidance_scale": 6.0,
+    "scheduler": "FlowMatchEulerDiscreteScheduler",
+    "shift": 1.0,
+    "seed": 42
+  },
+  "text_conditioning": {
+    "prompt_hash": "72e420d709750efb6650f329a3523dcbf57ad727b8336921169c0e8e1d061b2e",
+    "prompt_embedding_checksum": "3af6a9e753c604f82e33513cbb088ac30f32abe8132dd7d93be182ffdb15afdf",
+    "c2_reference_prompt_hash": "b139ac390ce2d7ee38032d125392da0bfdf69245c67c15fb7b598b7ad455ba6c",
+    "is_different_from_c2": true
+  },
+  "runtime_metrics": {
+    "transformer_denoise_seconds": 6037.78,
+    "peak_vram_mb": 2951.79
+  },
+  "photometric_metrics": {
+    "mean_pixel_diff_f1_vs_f7": 18.0431,
+    "frame_1_black_level": 2.151,
+    "frame_7_black_level": 26.777,
+    "black_level_delta": 24.626,
+    "dynamic_range_decay_percent": 21.09
+  },
+  "final_verdict": {
+    "verdict": "VERDICT_B_CONFIRMED",
+    "motion_result": "STILL_8_FRAMES_NEARLY_STATIC_NO_ROTATION_OBSERVED",
+    "instruction": "DO_NOT_CONTINUE_TUNING_CFG",
+    "next_step_focus": [
+      "1. Audit Prompt embedding update and transmission",
+      "2. Audit pipeline temporal conditioning in Transformer",
+      "3. Analyze Wan2.1-1.3B motion inertia and static video degeneration"
+    ]
+  }
+}
