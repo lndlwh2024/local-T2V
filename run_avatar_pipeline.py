@@ -82,20 +82,29 @@ def build_shot_item(
     strength: float = 0.30,
     enable_temporal_anchoring: bool = False,
     enable_post_processing: bool = False,
-    use_full_sequence_reference: bool = True
+    use_full_sequence_reference: bool = True,
+    custom_prompt: str = None,
+    custom_negative_prompt: str = None
 ) -> dict:
     """
     构造标准分镜头数据包
     设计原因：
     底层锁定 9 帧 (4n+1，n=2)，采用生产黄金甜点 (strength=0.30) 与全时序因果编码 (use_full_sequence_reference)；
     配合全精度 FP32 VAE 解码与零后处理原生输出，截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
+    支持可选 custom_prompt 与 custom_negative_prompt 注入，支持独立阶段 D 大动作压力测试。
     """
     shot_id = shot_info["id"]
-    full_prompt = f"{AVATAR_BASE_PROMPT} Action: {shot_info['action']}"
+    if custom_prompt:
+        full_prompt = custom_prompt
+    else:
+        full_prompt = f"{AVATAR_BASE_PROMPT} Action: {shot_info['action']}"
+    
+    neg_prompt = custom_negative_prompt if custom_negative_prompt else NEGATIVE_PROMPT
+
     return {
         "id": shot_id,
         "prompt": full_prompt,
-        "negative_prompt": NEGATIVE_PROMPT,
+        "negative_prompt": neg_prompt,
         "first_frame_path": first_frame_path,
         "strength": strength,
         "enable_temporal_anchoring": enable_temporal_anchoring,
@@ -122,6 +131,8 @@ def main():
     parser.add_argument("--force", action="store_true", help="强制重新渲染，不复用已有分镜缓存")
     parser.add_argument("--first-frame", type=str, default="media/数字人大图正面.png", help="首帧参考数字人图像路径（默认 media/数字人大图正面.png）")
     parser.add_argument("--output", type=str, default="avatar_speech_5s.mp4", help="最终成品视频文件名")
+    parser.add_argument("--prompt", type=str, default=None, help="自定义正向提示词（覆盖分镜默认提示词）")
+    parser.add_argument("--negative-prompt", type=str, default=None, help="自定义负向提示词（覆盖分镜默认负向提示词）")
     parser.add_argument("--no-temporal-anchor", action="store_true", help="关闭 Progressive Temporal Identity Anchoring (生产模式默认已关闭)")
     parser.add_argument("--no-post-process", action="store_true", help="关闭后处理与逐帧自动归一化，仅输出原始解码结果 (生产模式默认已关闭)")
     parser.add_argument("--no-full-sequence-reference", action="store_true", help="关闭全时序参考潜变量初始化，退回旧版单帧广播模式")
@@ -140,12 +151,14 @@ def main():
     logger.info(f"  后处理管线: {'【已彻底关闭】(零后处理原生解码帧 Raw Decoded Frames，零发雾)' if not enable_post else '【开启】(时序动态对比度校准 + 自适应垂直保边滤波)'}")
     if args.first_frame:
         logger.info(f"  首帧定义: {args.first_frame} (I2V 条件注入模式)")
+    if args.prompt:
+        logger.info(f"  自定义提示词注入: {args.prompt[:60]}...")
     logger.info("==================================================================")
 
     # 准备基础配置
     base_config = VideoGenerationConfig(
-        prompt=AVATAR_BASE_PROMPT,
-        negative_prompt=NEGATIVE_PROMPT,
+        prompt=args.prompt if args.prompt else AVATAR_BASE_PROMPT,
+        negative_prompt=args.negative_prompt if args.negative_prompt else NEGATIVE_PROMPT,
         first_frame_path=args.first_frame,
         strength=args.strength,
         enable_temporal_anchoring=enable_anchor,
@@ -157,9 +170,6 @@ def main():
         target_num_frames=8,
         fps=8,
         num_inference_steps=args.steps,
-        # 调优 guidance_scale = 2.0
-        # 设计原因：
-        # 在首帧潜变量注入模式下，CFG=2.0 专注于引导眼皮眨动与呼吸微表情，杜绝高 CFG (5.0) 的通用文本先验对抗原图骨相五官。
         guidance_scale=2.0,
         seed=args.seed,
         vram_limit_gb=3.6
@@ -177,7 +187,9 @@ def main():
             strength=args.strength,
             enable_temporal_anchoring=enable_anchor,
             enable_post_processing=enable_post,
-            use_full_sequence_reference=use_full_seq
+            use_full_sequence_reference=use_full_seq,
+            custom_prompt=args.prompt,
+            custom_negative_prompt=args.negative_prompt
         ) for s in targets_info
     ]
 

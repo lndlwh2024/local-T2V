@@ -1,0 +1,58 @@
+{
+  "version": "V2.7",
+  "experiment_name": "run_D1_C2_1s_big_motion_same_clothes",
+  "base_baseline": "avatar-c2-sweetspot-v1",
+  "task": "Stage D1: 1s/8f Big Motion Collapse Test under C2 Parameters",
+  "status": "COMPLETED_AND_ASSESSED",
+  "architecture": {
+    "transformer": "Wan2.1-1.3B FP16 DiT",
+    "text_encoder": "UMT5-XXL FP8",
+    "vae": "3D Causal VAE FP32",
+    "resolution": [
+      832,
+      480
+    ],
+    "fps": 8,
+    "frames": {
+      "generated": 9,
+      "exported": 8,
+      "replacement_frame_0": true
+    }
+  },
+  "hyperparameters": {
+    "configured_steps": 50,
+    "strength": 0.3,
+    "actual_steps": 15,
+    "guidance_scale": 2.0,
+    "scheduler": "FlowMatchEulerDiscreteScheduler",
+    "shift": 1.0,
+    "seed": 42
+  },
+  "pipeline_controls": {
+    "use_full_sequence_reference": true,
+    "enable_temporal_anchoring": false,
+    "anchor_weight": 0.0,
+    "enable_post_processing": false
+  },
+  "runtime_metrics": {
+    "denoise_time_seconds": 1529.43,
+    "peak_vram_mb": 2951.24
+  },
+  "photometric_metrics": {
+    "black_level_delta": 1.299,
+    "highlight_delta": -1.299,
+    "dynamic_range_delta": -2.598,
+    "dynamic_range_decay_percent": 1.05,
+    "motion_mean_pixel_diff_f1_vs_f7": 1.4736,
+    "motion_max_pixel_diff_f1_vs_f7": 71.0
+  },
+  "four_dimensional_verdict": {
+    "visual_usability": "AVAILABLE_IMAGE_QUALITY_BUT_ACTION_SUPPRESSED",
+    "first_broken_part": "ACTION_RESPONSIVENESS_SUPPRESSED_NO_STRUCTURAL_BREAK",
+    "comparison_with_c2": {
+      "motion_increased_significantly": false,
+      "quality_loss_acceptable": true
+    },
+    "next_step_recommendation": "PAUSE_AND_SUMMARIZE_BOUNDARY_DO_NOT_DIRECTLY_ENTER_3S"
+  }
+}
