@@ -1,0 +1,49 @@
+{
+  "version": "2.11",
+  "stage": "D2.3",
+  "mode": "PURE_T2V_LONG_TEMPORAL_DIAGNOSIS",
+  "description": "5秒 / 4fps / 20帧 纯 T2V 大动作能力诊断与模型时序建模能力裁定",
+  "parameters": {
+    "model": "Wan2.1-T2V-1.3B",
+    "precision": {
+      "transformer": "FP16",
+      "text_encoder": "UMT5-XXL-FP8",
+      "vae": "FP32"
+    },
+    "resolution": {
+      "width": 832,
+      "height": 480
+    },
+    "duration_seconds": 5.0,
+    "fps": 4,
+    "num_frames_raw": 21,
+    "target_output_frames": 20,
+    "num_inference_steps": 50,
+    "guidance_scale": 6.0,
+    "seed": 42,
+    "use_full_sequence_reference": false,
+    "initial_latents_source": "RANDOM_NOISE",
+    "enable_temporal_anchoring": false,
+    "enable_post_processing": false,
+    "first_frame_replacement": false
+  },
+  "runtime_metrics": {
+    "transformer_denoise_sec": 12518.87,
+    "total_elapsed_sec": 12761.74,
+    "gpu_peak_vram_mb": 3174.06,
+    "prompt_sha256": "c42e9481876e882f3e001b50765e246289e12a8134b9b3778ecae8b5e864a650",
+    "text_embedding_checksum": "b6a7de094440862fb71583a7040d52adc06e9fc5b4e2b18fbb8967b1ea37d1bf"
+  },
+  "diagnostic_verdicts": {
+    "q1_pose_different_f0_f10_f19": false,
+    "q2_clear_3stage_front_turn_side": false,
+    "q3_continuous_evolution_or_static_repeat": "STATIC_REPEAT",
+    "q4_copier_or_static_videoization": true,
+    "q5_text_driven_big_motion_capability_insufficient": true
+  },
+  "production_guidance": {
+    "production_mode": "AVATAR_STABLE_MICRO_MOTION",
+    "production_sweetspot_strength": 0.3,
+    "conclusion": "C2 架构为数字人工程唯一正解；纯文本大动作无法在 Wan1.3B 下成立；后续大动作开发必须依赖 ControlNet OpenPose 等显式姿态序列。"
+  }
+}

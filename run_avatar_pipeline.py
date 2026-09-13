@@ -84,14 +84,16 @@ def build_shot_item(
     enable_post_processing: bool = False,
     use_full_sequence_reference: bool = True,
     custom_prompt: str = None,
-    custom_negative_prompt: str = None
+    custom_negative_prompt: str = None,
+    num_frames: int = 9,
+    target_num_frames: int = 8
 ) -> dict:
     """
     构造标准分镜头数据包
     设计原因：
-    底层锁定 9 帧 (4n+1，n=2)，采用生产黄金甜点 (strength=0.30) 与全时序因果编码 (use_full_sequence_reference)；
-    配合全精度 FP32 VAE 解码与零后处理原生输出，截取前 8 帧输出，严格对齐 8 帧 @ 8fps 1.0 秒业务需求。
-    支持可选 custom_prompt 与 custom_negative_prompt 注入，支持独立阶段 D 大动作压力测试。
+    支持按需设定底层生成帧数 (满足 4n+1 因果对齐) 与目标交付帧数；
+    生产模式采用黄金甜点 (strength=0.30) 与全时序因果编码 (use_full_sequence_reference)；
+    纯 T2V 实验模式 (如 D2.3) 支持拓展至 21 帧生成 / 20 帧输出，全时序大动作能力诊断。
     """
     shot_id = shot_info["id"]
     if custom_prompt:
@@ -110,8 +112,8 @@ def build_shot_item(
         "enable_temporal_anchoring": enable_temporal_anchoring,
         "enable_post_processing": enable_post_processing,
         "use_full_sequence_reference": use_full_sequence_reference,
-        "num_frames": 9,
-        "target_num_frames": 8,
+        "num_frames": num_frames,
+        "target_num_frames": target_num_frames,
         "seed": seed,
         "output_filename": f"{filename_prefix}avatar_{shot_id}.mp4",
         "time": shot_info["time"],
@@ -124,6 +126,9 @@ def main():
     parser.add_argument("--shot", choices=["all", "shot_01", "shot_02", "shot_03", "shot_04", "shot_05"], default="all", help="指定渲染的分镜镜头（默认全部）")
     parser.add_argument("--width", type=int, default=832, help="视频宽度（默认 832 官方原生480P）")
     parser.add_argument("--height", type=int, default=480, help="视频高度（默认 480 官方原生480P）")
+    parser.add_argument("--num-frames", type=int, default=9, help="底层计算帧数（必须满足 4n+1，生产默认 9，实验 D2.3 设置为 21）")
+    parser.add_argument("--target-frames", type=int, default=8, help="目标交付帧数（生产默认 8，实验 D2.3 设置为 20）")
+    parser.add_argument("--fps", type=int, default=8, help="播放帧率 fps（生产默认 8，实验 D2.3 设置为 4）")
     parser.add_argument("--steps", type=int, default=50, help="去噪采样步数（生产模式锁定 50 步，默认 50）")
     parser.add_argument("--strength", type=float, default=0.30, help="生产黄金甜点去噪强度 (Production Sweet Spot: 默认 0.30)")
     parser.add_argument("--seed", type=int, default=42, help="随机数种子（固定人物面貌一致性）")
@@ -136,9 +141,9 @@ def main():
     parser.add_argument("--no-temporal-anchor", action="store_true", help="关闭 Progressive Temporal Identity Anchoring (生产模式默认已关闭)")
     parser.add_argument("--no-post-process", action="store_true", help="关闭后处理与逐帧自动归一化，仅输出原始解码结果 (生产模式默认已关闭)")
     parser.add_argument("--no-full-sequence-reference", action="store_true", help="关闭全时序参考潜变量初始化，退回旧版单帧广播模式")
-    parser.add_argument("--pure-t2v", action="store_true", help="启用实验 D2-Control / D2.1 纯 T2V 随机高斯噪声对照模式 (关闭全部参考潜变量与原图)")
-    parser.add_argument("--cfg", type=float, default=2.0, help="Classifier-Free Guidance 文本引导权重 (默认 2.0，实验 D2.1 提升为 6.0)")
-    parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_C2_strength030）")
+    parser.add_argument("--pure-t2v", action="store_true", help="启用实验 D2-Control / D2.1 / D2.3 纯 T2V 随机高斯噪声对照模式 (关闭全部参考潜变量与原图)")
+    parser.add_argument("--cfg", type=float, default=2.0, help="Classifier-Free Guidance 文本引导权重 (默认 2.0，实验 D2.1/D2.3 提升为 6.0)")
+    parser.add_argument("--output-dir", type=str, default=None, help="指定实验输出目录（如 run_D2_3_5s_4fps_20f_pure_t2v）")
     args = parser.parse_args()
 
     enable_anchor = not args.no_temporal_anchor if args.no_temporal_anchor else False
@@ -181,9 +186,9 @@ def main():
         use_full_sequence_reference=use_full_seq,
         width=args.width,
         height=args.height,
-        num_frames=9,
-        target_num_frames=8,
-        fps=8,
+        num_frames=args.num_frames,
+        target_num_frames=args.target_frames,
+        fps=args.fps,
         num_inference_steps=args.steps,
         guidance_scale=args.cfg,
         seed=args.seed,
@@ -204,7 +209,9 @@ def main():
             enable_post_processing=enable_post,
             use_full_sequence_reference=use_full_seq,
             custom_prompt=args.prompt,
-            custom_negative_prompt=args.negative_prompt
+            custom_negative_prompt=args.negative_prompt,
+            num_frames=args.num_frames,
+            target_num_frames=args.target_frames
         ) for s in targets_info
     ]
 
@@ -291,8 +298,19 @@ def main():
                 exp_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"正在保存实验数据至目录: {exp_dir.resolve()} ...")
 
-                # 1. 保存 frame_0.png ~ frame_7.png 与未替换的 raw_decoded_frame_0_before_replacement.png
-                for f_idx, fr in enumerate(v_frames[:8]):
+                # 1. 导出 preview.gif 与 preview.mp4 至实验归档目录
+                import shutil
+                gif_exp_path = exp_dir / "preview.gif"
+                imageio.mimsave(str(gif_exp_path), v_frames, fps=args.fps, loop=0)
+                logger.info(f"  实验动态预览 GIF 已归档: {gif_exp_path.name}")
+
+                mp4_exp_path = exp_dir / "preview.mp4"
+                if Path(single_video).exists():
+                    shutil.copyfile(single_video, mp4_exp_path)
+                    logger.info(f"  实验视频 MP4 已归档: {mp4_exp_path.name}")
+
+                # 2. 保存 frame_0.png ~ frame_{N-1}.png 与未替换的 raw_decoded_frame_0_before_replacement.png
+                for f_idx, fr in enumerate(v_frames):
                     f_path = exp_dir / f"frame_{f_idx}.png"
                     Image.fromarray(fr).save(str(f_path))
                     logger.info(f"  已导出原始画幅帧: {f_path.name}")
@@ -303,29 +321,31 @@ def main():
                     Image.fromarray(raw_f0).save(str(raw_f0_path))
                     logger.info(f"  【实验 B3】已导出未替换原图的原始生成第0帧: {raw_f0_path.name}")
 
-                # 2. 生成 contact_sheet.png (2x4 网格布局，清晰排版并带标签)
-                cols = 4
-                rows = 2
+                # 3. 生成 contact_sheet.png (自适应网格布局，清晰排版并带时序标签)
+                total_v_frames = len(v_frames)
+                cols = 4 if total_v_frames % 4 == 0 else (5 if total_v_frames % 5 == 0 else 4)
+                rows = (total_v_frames + cols - 1) // cols
                 banner_h = 36
                 sheet_w = cols * w
                 sheet_h = rows * (h + banner_h)
                 contact_sheet = Image.new("RGB", (sheet_w, sheet_h), color=(20, 20, 20))
                 draw = ImageDraw.Draw(contact_sheet)
 
-                for idx in range(min(8, len(v_frames))):
+                for idx in range(total_v_frames):
                     col = idx % cols
                     row = idx // cols
                     x = col * w
                     y = row * (h + banner_h)
+                    sec_val = idx / max(args.fps, 1)
 
                     if args.pure_t2v:
-                        label = f"Frame {idx} (Pure T2V | Random Noise)"
+                        label = f"Frame {idx} ({sec_val:.2f}s | Pure T2V | CFG={args.cfg})"
                     elif idx == 0:
                         label = "Frame 0 (Replaced with Reference Image)"
                     else:
                         anchor_tag = "Anchor: 0%" if not enable_anchor else ("Anchor: 85%" if idx <= 4 else "Anchor: 80%")
                         ref_tag = "B3: FullSeq Ref" if use_full_seq else "B1: Single Broadcast"
-                        label = f"Frame {idx} ({anchor_tag} | {ref_tag})"
+                        label = f"Frame {idx} ({sec_val:.2f}s | {anchor_tag} | {ref_tag})"
 
                     draw.rectangle([x, y, x + w, y + banner_h], fill=(32, 32, 32))
                     draw.text((x + 16, y + 10), label, fill=(240, 240, 240))
@@ -336,13 +356,15 @@ def main():
                 contact_sheet.save(str(sheet_path))
                 logger.info(f"  接触印样对比图已生成: {sheet_path.name}")
 
-                # 3. 保存 8 帧面部微距连续演化条带至实验目录
-                strip_out_path = exp_dir / "face_strip_all8.png"
+                # 4. 保存面部微距连续演化条带至实验目录
+                strip_out_path = exp_dir / f"face_strip_all{len(face_crops)}.png"
                 strip_canvas.save(str(strip_out_path))
-                logger.info(f"  8帧面部连续演化条带已生成: {strip_out_path.name}")
+                logger.info(f"  全时序面部连续演化条带已生成: {strip_out_path.name}")
+                if len(face_crops) == 20:
+                    strip_canvas.save(str(exp_dir / "face_strip_all20.png"))
 
-                # 3.1 生成 Frame 1 vs Frame 7 面部微距特写对比图 (f1_vs_f7_face_compare.png)
-                if len(face_crops) >= 8:
+                # 4.1 生成 Frame 1 vs Frame 7 面部微距特写对比图 (若存在 8 帧场景)
+                if len(face_crops) >= 8 and len(v_frames) < 20:
                     f1_face = face_crops[1]
                     f7_face = face_crops[7]
                     cw_cmp, ch_cmp = f1_face.size
@@ -361,6 +383,43 @@ def main():
                     f17_path = exp_dir / "f1_vs_f7_face_compare.png"
                     f17_canvas.save(str(f17_path))
                     logger.info(f"  Frame 1 vs Frame 7 面部特写对比图已生成: {f17_path.name}")
+
+                # 4.2 实验 D2.3 关键图件：Frame 0 vs Frame 10 vs Frame 19 三联关键阶段姿态对比图
+                if len(v_frames) >= 20:
+                    idx_trio = [0, 10, 19]
+                    banner_cmp3_h = 36
+                    canvas_cmp3 = Image.new("RGB", (w * 3, h + banner_cmp3_h), color=(20, 20, 20))
+                    draw_cmp3 = ImageDraw.Draw(canvas_cmp3)
+                    trio_labels = [
+                        f"Frame 0 (0.00s | Start: Front Facing Pose)",
+                        f"Frame 10 ({10 / args.fps:.2f}s | Middle: Turning Motion Pose)",
+                        f"Frame 19 ({19 / args.fps:.2f}s | End: ~40-deg Left-Facing Pose)"
+                    ]
+                    for t_i, (f_i, t_lbl) in enumerate(zip(idx_trio, trio_labels)):
+                        x_i = t_i * w
+                        draw_cmp3.rectangle([x_i, 0, x_i + w, banner_cmp3_h], fill=(32 + t_i * 8, 32 + t_i * 8, 32 + t_i * 8))
+                        draw_cmp3.text((x_i + 16, 10), t_lbl, fill=(240, 240, 240))
+                        canvas_cmp3.paste(Image.fromarray(v_frames[f_i]), (x_i, banner_cmp3_h))
+                    cmp3_path = exp_dir / "f0_vs_f10_vs_f19_compare.png"
+                    canvas_cmp3.save(str(cmp3_path))
+                    logger.info(f"  Frame 0 vs Frame 10 vs Frame 19 三联姿态对比图已生成: {cmp3_path.name}")
+
+                # 4.3 实验 D2.3 关键图件：0 / 5 / 10 / 15 / 19 关键姿态时序演化五联对照图
+                if len(v_frames) >= 20:
+                    kp_indices = [0, 5, 10, 15, 19]
+                    banner_kp_h = 36
+                    kp_canvas = Image.new("RGB", (w * 5, h + banner_kp_h), color=(20, 20, 20))
+                    draw_kp = ImageDraw.Draw(kp_canvas)
+                    for kp_i, f_idx in enumerate(kp_indices):
+                        x_kp = kp_i * w
+                        sec_kp = f_idx / args.fps
+                        kp_lbl = f"Frame {f_idx} ({sec_kp:.2f}s)"
+                        draw_kp.rectangle([x_kp, 0, x_kp + w, banner_kp_h], fill=(32, 32, 32))
+                        draw_kp.text((x_kp + 16, 10), kp_lbl, fill=(240, 240, 240))
+                        kp_canvas.paste(Image.fromarray(v_frames[f_idx]), (x_kp, banner_kp_h))
+                    kp_path = exp_dir / "temporal_keypose_sheet.png"
+                    kp_canvas.save(str(kp_path))
+                    logger.info(f"  0/5/10/15/19 关键姿态时序演化图已生成: {kp_path.name}")
 
                 # 4. 导出 run_config.txt (包含 14 项完整诊断数据与配置)
                 diag = shot_res.get("diagnostics", audit.get("diagnostics", {}))
@@ -514,14 +573,14 @@ def main():
                     "=" * 80,
                     "【恒定实验参数清单】",
                     f"- 模型架构: Wan2.1-1.3B FP16 DiT + UMT5-XXL FP8 + FP32 3D-VAE",
-                    f"- Prompt: {AVATAR_BASE_PROMPT}",
+                    f"- Prompt: {act_prompt_str if act_prompt_str else AVATAR_BASE_PROMPT}",
                     f"- Seed: {args.seed}",
                     f"- 分辨率: {args.width}x{args.height}",
-                    f"- 原始帧数: 9 帧 (最终导出精确截取前 8 帧)",
-                    f"- 帧率: 8 fps",
+                    f"- 原始帧数: {args.num_frames} 帧 (最终导出精确截取前 {args.target_frames} 帧)",
+                    f"- 帧率: {args.fps} fps",
                     f"- 步数: {args.steps}",
                     f"- Strength: {args.strength}",
-                    f"- CFG (guidance_scale): 2.0",
+                    f"- CFG (guidance_scale): {args.cfg}",
                     f"- 后处理: {'【已彻底关闭】(跳过对比度恢复与垂直滤波，无逐帧归一化，仅输出 raw decode 帧)' if not enable_post else '开启'}",
                     f"- 显存机制: CPU/GPU 内存解耦换入换出",
                     "=" * 80,
@@ -540,21 +599,24 @@ def main():
                     f.write(config_content)
                 logger.info("  run_debug.txt 已同步保存至工作区根目录！")
 
-                # 按照用户要求在控制台直接打印关键去噪执行指标与实验 B3 诊断指标
-                # 按照用户要求在控制台直接打印关键去噪执行指标与实验 B3 / D2-Control 诊断指标
+                # 按照用户要求在控制台直接打印关键去噪执行指标与实验诊断指标
                 logger.info("==================================================================")
                 if args.pure_t2v:
-                    logger.info(f"  【实验 D2.1 纯 T2V 对照关键指标控制台汇总 (CFG={args.cfg})】")
+                    logger.info(f"  【纯 T2V 对照关键指标控制台汇总 (CFG={args.cfg}, 帧数={args.target_frames}f@{args.fps}fps)】")
                     logger.info("  use_full_sequence_reference = False")
                     logger.info("  initial_latents_source = RANDOM_NOISE")
                     logger.info(f"  actual prompt = {act_prompt_str}")
                     logger.info(f"  prompt_hash = {cur_prompt_hash}")
                     logger.info(f"  text_embedding_checksum = {diag.get('prompt_embedding_hash', 'N/A')}")
                     logger.info(f"  c2_reference_prompt_hash = {c2_hash_val} (Different: {cur_prompt_hash != c2_hash_val})")
+                    logger.info(f"  guidance_scale (CFG) = {diag.get('guidance_scale', args.cfg)}")
+                    logger.info(f"  configured_num_inference_steps = {args.steps}")
                     logger.info(f"  actual_iteration_count = {diag.get('actual_iteration_count', args.steps)}")
-                    logger.info(f"  CFG (guidance_scale) = {diag.get('guidance_scale', args.cfg)}")
+                    logger.info(f"  actual timesteps 前5个: {diag.get('actual_timesteps_head5')}")
+                    logger.info(f"  actual timesteps 后5个: {diag.get('actual_timesteps_tail5')}")
                     logger.info(f"  Transformer 去噪耗时: {diag.get('transformer_denoise_elapsed_sec')} s")
-                    logger.info(f"  峰值显存: {audit['gpu_peak_vram_mb']} MB")
+                    logger.info(f"  总运行时间 (total runtime): {audit['total_elapsed_sec']} s")
+                    logger.info(f"  峰值显存 (peak VRAM): {audit['gpu_peak_vram_mb']} MB")
                 else:
                     logger.info("  【实验 B3 关键诊断指标控制台汇总】")
                     logger.info(f"  1. 参考潜变量模式: use_full_sequence_reference = {use_full_seq}")
